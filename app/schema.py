@@ -2,6 +2,8 @@ import graphene
 from graphene_sqlalchemy import SQLAlchemyObjectType
 from app.models import CO2Reading, ErrorLog, HumidityReading, Location, Sensor, SensorLocation, SensorReading as SensorReadingModel, TemperatureReading
 from app import db
+from sqlalchemy import and_
+from datetime import datetime
 
 class SensorObject(SQLAlchemyObjectType):
     class Meta:
@@ -71,6 +73,18 @@ class SensorReadingObject(SQLAlchemyObjectType):
 
     def resolve_co2_reading(self, info):
         return CO2Reading.query.filter(CO2Reading.reading_id == self.id).first()
+    
+class SensorDataFilterInput(graphene.InputObjectType):
+    start_date = graphene.DateTime()
+    end_date = graphene.DateTime()
+    min_co2_ppm = graphene.Float()
+    max_co2_ppm = graphene.Float()
+    min_temperature_celsius = graphene.Float()
+    max_temperature_celsius = graphene.Float()
+    min_humidity_percentage = graphene.Float()
+    max_humidity_percentage = graphene.Float()
+    sensor_ids = graphene.List(graphene.ID)
+    location_ids = graphene.List(graphene.ID)
     
 class CreateSensorReadingInput(graphene.InputObjectType):
     sensor_id = graphene.Int(required=True)
@@ -190,5 +204,39 @@ class Query(graphene.ObjectType):
 
     def resolve_location(self, info, id):
         return Location.query.get(id)
+    
+    filtered_sensor_readings = graphene.List(SensorReadingObject, filters=SensorDataFilterInput(required=True))
+
+    def resolve_filtered_sensor_readings(self, info, filters):
+        query = SensorReadingModel.query
+
+        if filters.start_date:
+            query = query.filter(SensorReadingModel.reading_time >= filters.start_date)
+        if filters.end_date:
+            query = query.filter(SensorReadingModel.reading_time <= filters.end_date)
+        if filters.min_co2_ppm or filters.max_co2_ppm:
+            query = query.join(CO2Reading)
+            if filters.min_co2_ppm:
+                query = query.filter(CO2Reading.co2_ppm >= filters.min_co2_ppm)
+            if filters.max_co2_ppm:
+                query = query.filter(CO2Reading.co2_ppm <= filters.max_co2_ppm)
+        if filters.min_temperature_celsius or filters.max_temperature_celsius:
+            query = query.join(TemperatureReading)
+            if filters.min_temperature_celsius:
+                query = query.filter(TemperatureReading.temperature_celsius >= filters.min_temperature_celsius)
+            if filters.max_temperature_celsius:
+                query = query.filter(TemperatureReading.temperature_celsius <= filters.max_temperature_celsius)
+        if filters.min_humidity_percentage or filters.max_humidity_percentage:
+            query = query.join(HumidityReading)
+            if filters.min_humidity_percentage:
+                query = query.filter(HumidityReading.humidity_percentage >= filters.min_humidity_percentage)
+            if filters.max_humidity_percentage:
+                query = query.filter(HumidityReading.humidity_percentage <= filters.max_humidity_percentage)
+        if filters.sensor_ids:
+            query = query.filter(SensorReadingModel.sensor_id.in_(filters.sensor_ids))
+        if filters.location_ids:
+            query = query.filter(SensorReadingModel.location_id.in_(filters.location_ids))
+
+        return query.all()
 
 schema = graphene.Schema(query=Query, mutation=Mutation, types=[CreateSensorReadingInput])
