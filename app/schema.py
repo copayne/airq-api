@@ -2,24 +2,8 @@ import graphene
 from graphene_sqlalchemy import SQLAlchemyObjectType
 from app.models import CO2Reading, ErrorLog, HumidityReading, Location, Sensor, SensorLocation, SensorReading as SensorReadingModel, TemperatureReading
 from app import db
-from sqlalchemy import and_
+from sqlalchemy import and_, desc
 from datetime import datetime
-
-class SensorObject(SQLAlchemyObjectType):
-    class Meta:
-        model = Sensor
-
-    readings = graphene.List(lambda: SensorReadingObject)
-    current_location = graphene.Field(lambda: LocationObject)
-
-    def resolve_readings(self, info):
-        return SensorReadingModel.query.filter(SensorReadingModel.sensor_id == self.id).all()
-
-    def resolve_current_location(self, info):
-        current_sensor_location = SensorLocation.query.filter(SensorLocation.sensor_id == self.id, SensorLocation.is_current == True).first()
-        if current_sensor_location:
-            return Location.query.get(current_sensor_location.location_id)
-        return None
 
 class LocationObject(SQLAlchemyObjectType):
     class Meta:
@@ -73,6 +57,27 @@ class SensorReadingObject(SQLAlchemyObjectType):
 
     def resolve_co2_reading(self, info):
         return CO2Reading.query.filter(CO2Reading.reading_id == self.id).first()
+    
+class SensorObject(SQLAlchemyObjectType):
+    class Meta:
+        model = Sensor
+
+    readings = graphene.List(lambda: SensorReadingObject)
+    current_location = graphene.Field(lambda: LocationObject)
+    last_reading = graphene.Field(SensorReadingObject)
+
+    def resolve_readings(self, info):
+        return SensorReadingModel.query.filter(SensorReadingModel.sensor_id == self.id).all()
+
+    def resolve_current_location(self, info):
+        current_sensor_location = SensorLocation.query.filter(SensorLocation.sensor_id == self.id, SensorLocation.is_current == True).first()
+        if current_sensor_location:
+            return Location.query.get(current_sensor_location.location_id)
+        return None
+    
+    def resolve_last_reading(self, info):
+        return SensorReadingModel.query.filter(SensorReadingModel.sensor_id == self.id).order_by(desc(SensorReadingModel.reading_time)).first()
+
     
 class SensorDataFilterInput(graphene.InputObjectType):
     start_date = graphene.DateTime()
