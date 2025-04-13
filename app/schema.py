@@ -2,7 +2,7 @@ import graphene
 from graphene_sqlalchemy import SQLAlchemyObjectType
 from app.models import CO2Reading, ErrorLog, HumidityReading, Location, Sensor, SensorLocation, SensorReading as SensorReadingModel, TemperatureReading
 from app import db
-from sqlalchemy import and_, desc
+from sqlalchemy import and_, or_, desc, asc
 from datetime import datetime
 
 class LocationObject(SQLAlchemyObjectType):
@@ -38,16 +38,13 @@ class SensorReadingObject(SQLAlchemyObjectType):
         model = SensorReadingModel
     
     sensor = graphene.Field(lambda: SensorObject)
-    location = graphene.Field(lambda: LocationObject)
     humidity_reading = graphene.Field(lambda: HumidityReadingObject)
     temperature_reading = graphene.Field(lambda: TemperatureReadingObject)
     co2_reading = graphene.Field(lambda: CO2ReadingObject)
+    location = graphene.Field(lambda: LocationObject)
 
     def resolve_sensor(self, info):
         return Sensor.query.get(self.sensor_id)
-
-    def resolve_location(self, info):
-        return Location.query.get(self.location_id)
 
     def resolve_humidity_reading(self, info):
         return HumidityReading.query.filter(HumidityReading.reading_id == self.id).first()
@@ -57,6 +54,22 @@ class SensorReadingObject(SQLAlchemyObjectType):
 
     def resolve_co2_reading(self, info):
         return CO2Reading.query.filter(CO2Reading.reading_id == self.id).first()
+    
+    def resolve_location(self, info):
+        # find sensor_location that matches sensor_id and reading time falls between start/end time
+        sensor_location = SensorLocation.query.filter(
+            SensorLocation.sensor_id == self.sensor_id,
+            SensorLocation.start_time <= self.reading_time,
+            or_(
+                SensorLocation.end_time == None,
+                SensorLocation.end_time >= self.reading_time
+            )
+        ).first()
+
+        print(sensor_location)
+        if sensor_location:
+            return Location.query.get(sensor_location.location_id)
+        return None
     
 class SensorObject(SQLAlchemyObjectType):
     class Meta:
@@ -90,10 +103,15 @@ class SensorDataFilterInput(graphene.InputObjectType):
     max_humidity_percentage = graphene.Float()
     sensor_ids = graphene.List(graphene.ID)
     location_ids = graphene.List(graphene.ID)
+    # New fields for pagination and ordering
+    limit = graphene.Int(description="Maximum number of records to return")
+    offset = graphene.Int(description="Number of records to skip")
+    order_by = graphene.String(description="Field to order by")
+    order_direction = graphene.String(description="Direction of ordering (asc or desc)")
+
     
 class CreateSensorReadingInput(graphene.InputObjectType):
     sensor_id = graphene.Int(required=True)
-    location_id = graphene.Int(required=True)
     humidity_percentage = graphene.Float()
     temperature_celsius = graphene.Float()
     co2_ppm = graphene.Int()
@@ -106,13 +124,15 @@ class CreateSensorReading(graphene.Mutation):
 
     @staticmethod
     def mutate(root, info, input):
+        # Create the sensor reading with just the sensor_id
         sensor_reading = SensorReadingModel(
-            sensor_id=input.sensor_id,
-            location_id=input.location_id,
+            sensor_id=input.sensor_id
         )
+        
         db.session.add(sensor_reading)
-        db.session.flush()  # This assigns an ID to sensor_reading
-
+        db.session.flush()  # This assigns an ID without committing
+        
+        # Create the specific readings as before
         if input.humidity_percentage is not None:
             humidity_reading = HumidityReading(reading_id=sensor_reading.id, humidity_percentage=input.humidity_percentage)
             db.session.add(humidity_reading)
@@ -124,9 +144,14 @@ class CreateSensorReading(graphene.Mutation):
         if input.co2_ppm is not None:
             co2_reading = CO2Reading(reading_id=sensor_reading.id, co2_ppm=input.co2_ppm)
             db.session.add(co2_reading)
-
-        db.session.commit()
-        return CreateSensorReading(sensor_reading=sensor_reading)
+        
+        try:
+            db.session.commit()
+            return CreateSensorReading(sensor_reading=sensor_reading)
+        except Exception as e:
+            db.session.rollback()
+            print(f"Error saving sensor reading: {str(e)}")
+            raise
 
 class HumidityReadingObject(SQLAlchemyObjectType):
     class Meta:
@@ -215,6 +240,8 @@ class Query(graphene.ObjectType):
     def resolve_filtered_sensor_readings(self, info, filters):
         query = SensorReadingModel.query
 
+        print(filters)
+
         if filters.start_date:
             query = query.filter(SensorReadingModel.reading_time >= filters.start_date)
         if filters.end_date:
@@ -241,6 +268,41 @@ class Query(graphene.ObjectType):
             query = query.filter(SensorReadingModel.sensor_id.in_(filters.sensor_ids))
         if filters.location_ids:
             query = query.filter(SensorReadingModel.location_id.in_(filters.location_ids))
+
+        # Default ordering is by reading_time descending
+        order_column = SensorReadingModel.reading_time
+        order_direction = desc
+        
+        # Allow overriding of default ordering
+        if hasattr(filters, 'order_by') and filters.order_by:
+            if filters.order_by == 'co2_ppm':
+                query = query.join(CO2Reading, isouter=True)
+                order_column = CO2Reading.co2_ppm
+            elif filters.order_by == 'temperature_celsius':
+                query = query.join(TemperatureReading, isouter=True)
+                order_column = TemperatureReading.temperature_celsius
+            elif filters.order_by == 'humidity_percentage':
+                query = query.join(HumidityReading, isouter=True)
+                order_column = HumidityReading.humidity_percentage
+            elif filters.order_by in ['reading_time', 'id']:
+                order_column = getattr(SensorReadingModel, filters.order_by)
+        
+        # Set sort direction
+        if hasattr(filters, 'order_direction') and filters.order_direction and filters.order_direction.lower() == 'asc':
+            order_direction = asc
+        
+        query = query.order_by(order_direction(order_column))
+        
+        # Apply pagination - default to limit of 100 if not specified
+        limit = 100
+        if hasattr(filters, 'limit') and filters.limit is not None:
+            limit = filters.limit
+        
+        offset = 0
+        if hasattr(filters, 'offset') and filters.offset is not None:
+            offset = filters.offset
+        
+        query = query.limit(limit).offset(offset)
 
         return query.all()
 

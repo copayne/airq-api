@@ -32,7 +32,6 @@ class SensorReading(db.Model):
     __tablename__ = 'sensor_readings'
     id = db.Column(db.Integer, primary_key=True)
     sensor_id = db.Column(db.Integer, db.ForeignKey('sensors.id'), nullable=False)
-    location_id = db.Column(db.Integer, db.ForeignKey('locations.id'), nullable=False)
     reading_time = db.Column(db.DateTime,
         nullable=False, unique=False, index=False,
         default=datetime.utcnow
