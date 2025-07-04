@@ -66,7 +66,6 @@ class SensorReadingObject(SQLAlchemyObjectType):
             )
         ).first()
 
-        print(sensor_location)
         if sensor_location:
             return Location.query.get(sensor_location.location_id)
         return None
@@ -150,8 +149,8 @@ class CreateSensorReading(graphene.Mutation):
             return CreateSensorReading(sensor_reading=sensor_reading)
         except Exception as e:
             db.session.rollback()
-            print(f"Error saving sensor reading: {str(e)}")
-            raise
+            # TODO: Replace with proper logging
+            raise Exception(f"Failed to save sensor reading: {str(e)}")
 
 class HumidityReadingObject(SQLAlchemyObjectType):
     class Meta:
@@ -240,8 +239,6 @@ class Query(graphene.ObjectType):
     def resolve_filtered_sensor_readings(self, info, filters):
         query = SensorReadingModel.query
 
-        print(filters)
-
         if filters.start_date:
             query = query.filter(SensorReadingModel.reading_time >= filters.start_date)
         if filters.end_date:
@@ -306,4 +303,14 @@ class Query(graphene.ObjectType):
 
         return query.all()
 
-schema = graphene.Schema(query=Query, mutation=Mutation, types=[CreateSensorReadingInput])
+from app.graphql_security import SecureGraphQLSchema
+
+schema = SecureGraphQLSchema(
+    query=Query, 
+    mutation=Mutation, 
+    types=[CreateSensorReadingInput],
+    max_depth=8,  # Appropriate for our schema depth
+    max_complexity=150,  # Allows filtered queries but prevents abuse
+    timeout_seconds=30,  # Reasonable timeout for database operations
+    enable_security_logging=True
+)
