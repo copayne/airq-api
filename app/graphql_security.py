@@ -7,17 +7,38 @@ import graphene
 import signal
 import time
 from typing import Optional, Dict, Any
-from graphql import (
-    GraphQLError, 
-    parse, 
-    validate
-)
-from graphql.validation import ValidationRule
-from graphene.validation import depth_limit_validator
-from flask import current_app
+from graphql import GraphQLError, parse, validate
+from graphql.validation.rules.base import ValidationRule
+from graphql.language import ast
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def create_depth_limit_validator(max_depth: int):
+    """
+    Creates a depth limiting validation rule for older GraphQL versions.
+    """
+    class DepthLimitValidationRule(ValidationRule):
+        def __init__(self, validation_context):
+            super().__init__(validation_context)
+            self.max_depth = max_depth
+            self.current_depth = 0
+            
+        def enter_field(self, node, *_args):
+            self.current_depth += 1
+            if self.current_depth > self.max_depth:
+                self.report_error(
+                    GraphQLError(
+                        f"Query depth {self.current_depth} exceeds maximum allowed depth of {self.max_depth}",
+                        nodes=[node]
+                    )
+                )
+        
+        def leave_field(self, node, *_args):
+            self.current_depth -= 1
+    
+    return DepthLimitValidationRule
 
 
 class QueryComplexityValidationRule(ValidationRule):
@@ -196,7 +217,7 @@ class SecureGraphQLSchema(graphene.Schema):
         
         # Add depth limiting validation
         if self.max_depth > 0:
-            validation_rules.append(depth_limit_validator(max_depth=self.max_depth))
+            validation_rules.append(create_depth_limit_validator(max_depth=self.max_depth))
         
         # Add complexity validation
         if self.max_complexity > 0:
@@ -205,11 +226,16 @@ class SecureGraphQLSchema(graphene.Schema):
             validation_rules.append(complexity_rule_factory)
         
         # Run all validations
-        validation_errors = validate(
-            schema=self.graphql_schema,
-            document_ast=document,
-            rules=validation_rules
-        )
+        try:
+            validation_errors = validate(
+                schema=self.graphql_schema,
+                document_ast=document,
+                rules=validation_rules
+            )
+        except Exception as e:
+            # If validation fails, return error
+            logger.error(f"Validation error: {str(e)}")
+            return [GraphQLError(f"Query validation failed: {str(e)}")]
         
         return validation_errors
 
