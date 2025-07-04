@@ -3,3 +3,7 @@
 .env
 __pycache__
 /airq
+/airq2
+.env.example
+CLAUDE.md
+OPTIMIZE.md
