@@ -25,12 +25,20 @@ def create_app(config_class=None):
     cors_credentials = app.config.get('CORS_SUPPORTS_CREDENTIALS', False)
     
     if cors_origins:
-        CORS(app, origins=cors_origins, supports_credentials=cors_credentials)
+        CORS(app, 
+             origins=cors_origins, 
+             supports_credentials=cors_credentials,
+             allow_headers=['Content-Type', 'Authorization'],
+             methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
     else:
         # Default to localhost for development, no CORS for production
         flask_env = app.config.get('FLASK_ENV', 'production')
         if flask_env == 'development':
-            CORS(app, origins=['http://localhost:3000'], supports_credentials=False)
+            CORS(app, 
+                 origins=['http://localhost:3000'], 
+                 supports_credentials=False,
+                 allow_headers=['Content-Type', 'Authorization'],
+                 methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
         # No CORS configuration for production - must be explicitly configured
 
     # Initialize GraphQL security middleware
