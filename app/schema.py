@@ -3,6 +3,7 @@ from graphene_sqlalchemy import SQLAlchemyObjectType
 from app.models import CO2Reading, ErrorLog, HumidityReading, Location, Sensor, SensorLocation, SensorReading as SensorReadingModel, TemperatureReading
 from app import db
 from sqlalchemy import and_, or_, desc, asc
+from sqlalchemy.orm import joinedload, selectinload
 from datetime import datetime
 
 class LocationObject(SQLAlchemyObjectType):
@@ -13,12 +14,18 @@ class LocationObject(SQLAlchemyObjectType):
     current_sensors = graphene.List(lambda: SensorObject)
 
     def resolve_readings(self, info):
-        return SensorReadingModel.query.filter(SensorReadingModel.location_id == self.id).all()
+        # Get all readings from sensors at this location via relationships
+        readings = []
+        for sensor_location in self.sensor_locations:
+            for reading in sensor_location.sensor.readings:
+                # Check if reading was taken when sensor was at this location
+                if (sensor_location.start_time <= reading.reading_time and 
+                    (sensor_location.end_time is None or sensor_location.end_time >= reading.reading_time)):
+                    readings.append(reading)
+        return readings
 
     def resolve_current_sensors(self, info):
-        current_sensor_locations = SensorLocation.query.filter(SensorLocation.location_id == self.id, SensorLocation.is_current == True).all()
-        sensor_ids = [sl.sensor_id for sl in current_sensor_locations]
-        return Sensor.query.filter(Sensor.id.in_(sensor_ids)).all()
+        return [sl.sensor for sl in self.sensor_locations if sl.is_current]
 
 class SensorLocationObject(SQLAlchemyObjectType):
     class Meta:
@@ -28,10 +35,10 @@ class SensorLocationObject(SQLAlchemyObjectType):
     location = graphene.Field(lambda: LocationObject)
 
     def resolve_sensor(self, info):
-        return Sensor.query.get(self.sensor_id)
+        return self.sensor
 
     def resolve_location(self, info):
-        return Location.query.get(self.location_id)
+        return self.location
 
 class SensorReadingObject(SQLAlchemyObjectType):
     class Meta:
@@ -44,30 +51,23 @@ class SensorReadingObject(SQLAlchemyObjectType):
     location = graphene.Field(lambda: LocationObject)
 
     def resolve_sensor(self, info):
-        return Sensor.query.get(self.sensor_id)
+        return self.sensor
 
     def resolve_humidity_reading(self, info):
-        return HumidityReading.query.filter(HumidityReading.reading_id == self.id).first()
+        return self.humidity_reading
 
     def resolve_temperature_reading(self, info):
-        return TemperatureReading.query.filter(TemperatureReading.reading_id == self.id).first()
+        return self.temperature_reading
 
     def resolve_co2_reading(self, info):
-        return CO2Reading.query.filter(CO2Reading.reading_id == self.id).first()
+        return self.co2_reading
     
     def resolve_location(self, info):
-        # find sensor_location that matches sensor_id and reading time falls between start/end time
-        sensor_location = SensorLocation.query.filter(
-            SensorLocation.sensor_id == self.sensor_id,
-            SensorLocation.start_time <= self.reading_time,
-            or_(
-                SensorLocation.end_time == None,
-                SensorLocation.end_time >= self.reading_time
-            )
-        ).first()
-
-        if sensor_location:
-            return Location.query.get(sensor_location.location_id)
+        # Optimized location lookup using relationship and time-based filtering
+        for sensor_location in self.sensor.sensor_locations:
+            if (sensor_location.start_time <= self.reading_time and 
+                (sensor_location.end_time is None or sensor_location.end_time >= self.reading_time)):
+                return sensor_location.location
         return None
     
 class SensorObject(SQLAlchemyObjectType):
@@ -79,16 +79,18 @@ class SensorObject(SQLAlchemyObjectType):
     last_reading = graphene.Field(SensorReadingObject)
 
     def resolve_readings(self, info):
-        return SensorReadingModel.query.filter(SensorReadingModel.sensor_id == self.id).all()
+        return self.readings
 
     def resolve_current_location(self, info):
-        current_sensor_location = SensorLocation.query.filter(SensorLocation.sensor_id == self.id, SensorLocation.is_current == True).first()
-        if current_sensor_location:
-            return Location.query.get(current_sensor_location.location_id)
+        for sensor_location in self.sensor_locations:
+            if sensor_location.is_current:
+                return sensor_location.location
         return None
     
     def resolve_last_reading(self, info):
-        return SensorReadingModel.query.filter(SensorReadingModel.sensor_id == self.id).order_by(desc(SensorReadingModel.reading_time)).first()
+        if self.readings:
+            return max(self.readings, key=lambda r: r.reading_time)
+        return None
 
     
 class SensorDataFilterInput(graphene.InputObjectType):
@@ -159,7 +161,7 @@ class HumidityReadingObject(SQLAlchemyObjectType):
     sensor_reading = graphene.Field(lambda: SensorReadingObject)
 
     def resolve_sensor_reading(self, info):
-        return SensorReadingModel.query.get(self.reading_id)
+        return self.sensor_reading
 
 class TemperatureReadingObject(SQLAlchemyObjectType):
     class Meta:
@@ -168,7 +170,7 @@ class TemperatureReadingObject(SQLAlchemyObjectType):
     sensor_reading = graphene.Field(lambda: SensorReadingObject)
 
     def resolve_sensor_reading(self, info):
-        return SensorReadingModel.query.get(self.reading_id)
+        return self.sensor_reading
 
 class CO2ReadingObject(SQLAlchemyObjectType):
     class Meta:
@@ -177,7 +179,7 @@ class CO2ReadingObject(SQLAlchemyObjectType):
     sensor_reading = graphene.Field(lambda: SensorReadingObject)
 
     def resolve_sensor_reading(self, info):
-        return SensorReadingModel.query.get(self.reading_id)
+        return self.sensor_reading
 
 class ErrorLogObject(SQLAlchemyObjectType):
     class Meta:
@@ -186,7 +188,7 @@ class ErrorLogObject(SQLAlchemyObjectType):
     sensor_reading = graphene.Field(lambda: SensorReadingObject)
 
     def resolve_sensor_reading(self, info):
-        return SensorReadingModel.query.get(self.reading_id)
+        return self.sensor_reading
     
 class Mutation(graphene.ObjectType):
     create_sensor_reading = CreateSensorReading.Field()
@@ -205,16 +207,31 @@ class Query(graphene.ObjectType):
     location = graphene.Field(LocationObject, id=graphene.Int(required=True))
 
     def resolve_sensors(self, info):
-        return Sensor.query.all()
+        return Sensor.query.options(
+            selectinload(Sensor.readings).selectinload(SensorReadingModel.humidity_reading),
+            selectinload(Sensor.readings).selectinload(SensorReadingModel.temperature_reading),
+            selectinload(Sensor.readings).selectinload(SensorReadingModel.co2_reading),
+            selectinload(Sensor.sensor_locations).selectinload(SensorLocation.location)
+        ).all()
 
     def resolve_locations(self, info):
-        return Location.query.all()
+        return Location.query.options(
+            selectinload(Location.sensor_locations).selectinload(SensorLocation.sensor)
+        ).all()
 
     def resolve_sensor_locations(self, info):
-        return SensorLocation.query.all()
+        return SensorLocation.query.options(
+            joinedload(SensorLocation.sensor),
+            joinedload(SensorLocation.location)
+        ).all()
 
     def resolve_sensor_readings(self, info):
-        return SensorReadingModel.query.all()
+        return SensorReadingModel.query.options(
+            joinedload(SensorReadingModel.sensor).selectinload(Sensor.sensor_locations).selectinload(SensorLocation.location),
+            joinedload(SensorReadingModel.humidity_reading),
+            joinedload(SensorReadingModel.temperature_reading),
+            joinedload(SensorReadingModel.co2_reading)
+        ).all()
 
     def resolve_humidity_readings(self, info):
         return HumidityReading.query.all()
@@ -229,15 +246,28 @@ class Query(graphene.ObjectType):
         return ErrorLog.query.all()
 
     def resolve_sensor(self, info, id):
-        return Sensor.query.get(id)
+        return Sensor.query.options(
+            selectinload(Sensor.readings).selectinload(SensorReadingModel.humidity_reading),
+            selectinload(Sensor.readings).selectinload(SensorReadingModel.temperature_reading),
+            selectinload(Sensor.readings).selectinload(SensorReadingModel.co2_reading),
+            selectinload(Sensor.sensor_locations).selectinload(SensorLocation.location)
+        ).get(id)
 
     def resolve_location(self, info, id):
-        return Location.query.get(id)
+        return Location.query.options(
+            selectinload(Location.sensor_locations).selectinload(SensorLocation.sensor)
+        ).get(id)
     
     filtered_sensor_readings = graphene.List(SensorReadingObject, filters=SensorDataFilterInput(required=True))
 
     def resolve_filtered_sensor_readings(self, info, filters):
-        query = SensorReadingModel.query
+        # Start with optimized eager loading
+        query = SensorReadingModel.query.options(
+            joinedload(SensorReadingModel.sensor).selectinload(Sensor.sensor_locations).selectinload(SensorLocation.location),
+            joinedload(SensorReadingModel.humidity_reading),
+            joinedload(SensorReadingModel.temperature_reading),
+            joinedload(SensorReadingModel.co2_reading)
+        )
 
         if filters.start_date:
             query = query.filter(SensorReadingModel.reading_time >= filters.start_date)
