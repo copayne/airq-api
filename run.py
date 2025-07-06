@@ -9,7 +9,7 @@ if __name__ == '__main__':
     
     # Environment-based configuration
     debug_mode = os.getenv('FLASK_DEBUG', 'false').lower() == 'true'
-    host = os.getenv('FLASK_HOST', '127.0.0.1')
+    host = os.getenv('FLASK_HOST', '0.0.0.0')  # Default to all interfaces for network access
     port = int(os.getenv('FLASK_PORT', '5000'))
     
     if debug_mode:
