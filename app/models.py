@@ -98,3 +98,25 @@ class ErrorLog(db.Model):
     
     # Relationships
     sensor_reading = relationship("SensorReading", back_populates="error_logs")
+
+class ApplicationErrorLog(db.Model):
+    __tablename__ = 'application_error_logs'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    timestamp = db.Column(db.DateTime, nullable=False, index=True, default=datetime.utcnow)
+    level = db.Column(db.String(20), nullable=False, index=True)  # ERROR, WARNING, INFO, DEBUG
+    message = db.Column(db.Text, nullable=False)
+    context = db.Column(db.JSON)  # JSON field for structured context data
+    request_id = db.Column(db.String(50), index=True)
+    user_id = db.Column(db.Integer, index=True)  # For future authentication
+    stack_trace = db.Column(db.Text)
+    source_file = db.Column(db.String(255))
+    source_function = db.Column(db.String(100))
+    source_line = db.Column(db.Integer)
+    created_at = db.Column(db.DateTime, nullable=False, index=True, default=datetime.utcnow)
+    
+    def __repr__(self):
+        return f'<ApplicationErrorLog {self.level}: {self.message[:50]}...>'
+
+# Database index for error log queries (timestamp + level)
+db.Index('idx_application_error_logs_timestamp_level', ApplicationErrorLog.timestamp, ApplicationErrorLog.level)

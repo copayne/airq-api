@@ -84,13 +84,37 @@ def create_specific_readings(readings, ReadingClass, value_generator):
                 )
                 specific_readings.append(specific_reading)
             except Exception as e:
-                print(f"Error creating {ReadingClass.__name__} for reading_id {reading.id}: {str(e)}")
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(
+                    f"Error creating {ReadingClass.__name__} for reading_id {reading.id}",
+                    exc_info=True,
+                    extra={
+                        'extra_context': {
+                            'reading_class': ReadingClass.__name__,
+                            'reading_id': reading.id,
+                            'operation': 'create_specific_reading'
+                        }
+                    }
+                )
     
     try:
         session.add_all(specific_readings)
         session.flush()
     except SQLAlchemyError as e:
-        print(f"Error flushing {ReadingClass.__name__}s: {str(e)}")
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(
+            f"Error flushing {ReadingClass.__name__}s to database",
+            exc_info=True,
+            extra={
+                'extra_context': {
+                    'reading_class': ReadingClass.__name__,
+                    'count': len(specific_readings),
+                    'operation': 'flush_readings'
+                }
+            }
+        )
         session.rollback()
     return specific_readings
 
@@ -134,27 +158,42 @@ def main():
         for table in [ErrorLog, CO2Reading, TemperatureReading, HumidityReading, SensorReading, SensorLocation, Sensor, Location]:
             session.query(table).delete()
         
-        print("Creating sensors...")
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        logger.info("Starting database seeding process")
+        logger.info("Creating sensors...")
         sensors = create_sensors()
-        print("Creating locations...")
+        logger.info("Creating locations...")
         locations = create_locations()
-        print("Creating sensor locations...")
+        logger.info("Creating sensor locations...")
         create_sensor_locations(sensors, locations)
-        print("Creating sensor readings...")
+        logger.info("Creating sensor readings...")
         readings = create_sensor_readings(sensors, locations)
-        print("Creating humidity readings...")
+        logger.info("Creating humidity readings...")
         create_humidity_readings(readings)
-        print("Creating temperature readings...")
+        logger.info("Creating temperature readings...")
         create_temperature_readings(readings)
-        print("Creating CO2 readings...")
+        logger.info("Creating CO2 readings...")
         create_co2_readings(readings)
-        print("Creating error logs...")
+        logger.info("Creating error logs...")
         create_error_logs(readings)
         
         session.commit()
-        print("Database seeded successfully!")
+        logger.info("Database seeded successfully!")
     except Exception as e:
-        print(f"An error occurred while seeding the database: {str(e)}")
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(
+            "An error occurred while seeding the database",
+            exc_info=True,
+            extra={
+                'extra_context': {
+                    'operation': 'database_seeding',
+                    'step': 'main_seeding_process'
+                }
+            }
+        )
         session.rollback()
     finally:
         session.close()
