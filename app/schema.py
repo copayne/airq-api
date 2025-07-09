@@ -164,8 +164,24 @@ class CreateSensorReading(graphene.Mutation):
             return CreateSensorReading(sensor_reading=sensor_reading)
         except Exception as e:
             db.session.rollback()
-            # TODO: Replace with proper logging
-            raise Exception(f"Failed to save sensor reading: {str(e)}")
+            # Log error with context for debugging
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(
+                "Failed to save sensor reading",
+                exc_info=True,
+                extra={
+                    'extra_context': {
+                        'sensor_id': input.sensor_id,
+                        'has_humidity': input.humidity_percentage is not None,
+                        'has_temperature': input.temperature_celsius is not None,
+                        'has_co2': input.co2_ppm is not None,
+                        'operation': 'create_sensor_reading'
+                    }
+                }
+            )
+            # Return sanitized error message for security
+            raise Exception("Failed to save sensor reading. Please try again.")
 
 class HumidityReadingObject(SQLAlchemyObjectType):
     class Meta:

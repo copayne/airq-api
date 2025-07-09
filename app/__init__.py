@@ -4,6 +4,7 @@ from flask_graphql import GraphQLView
 from flask_cors import CORS
 from config import get_config
 from app.graphql_security import GraphQLSecurityMiddleware
+from app.logging_config import setup_logging
 import logging
 import os
 
@@ -35,7 +36,7 @@ def create_app(config_class=None):
         flask_env = app.config.get('FLASK_ENV', 'production')
         if flask_env == 'development':
             CORS(app, 
-                 origins=['http://localhost:3000'], 
+                 origins=['http://mini.local:3000'], 
                  supports_credentials=False,
                  allow_headers=['Content-Type', 'Authorization'],
                  methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
@@ -59,12 +60,13 @@ def create_app(config_class=None):
     
     app.add_url_rule('/graphql', view_func=graphql_view)
 
-    # Configure logging
+    # Configure structured logging with database persistence
+    setup_logging(app, db)
+    
+    # Log application startup
     if not app.debug:
-        logging.basicConfig(level=logging.INFO)
         app.logger.info('AirQ API startup - GraphQL security enabled with query protection')
     else:
-        logging.basicConfig(level=logging.DEBUG)
         app.logger.debug('AirQ API startup - Development mode with full GraphQL security')
 
     return app
