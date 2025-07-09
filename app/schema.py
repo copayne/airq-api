@@ -63,12 +63,17 @@ class SensorReadingObject(SQLAlchemyObjectType):
         return self.co2_reading
     
     def resolve_location(self, info):
-        # Optimized location lookup using relationship and time-based filtering
-        for sensor_location in self.sensor.sensor_locations:
-            if (sensor_location.start_time <= self.reading_time and 
-                (sensor_location.end_time is None or sensor_location.end_time >= self.reading_time)):
-                return sensor_location.location
-        return None
+        # Optimized database query instead of Python loop
+        sensor_location = SensorLocation.query.filter(
+            SensorLocation.sensor_id == self.sensor_id,
+            SensorLocation.start_time <= self.reading_time,
+            or_(
+                SensorLocation.end_time.is_(None),
+                SensorLocation.end_time >= self.reading_time
+            )
+        ).options(joinedload(SensorLocation.location)).first()
+        
+        return sensor_location.location if sensor_location else None
     
 class SensorObject(SQLAlchemyObjectType):
     class Meta:
@@ -79,7 +84,12 @@ class SensorObject(SQLAlchemyObjectType):
     last_reading = graphene.Field(SensorReadingObject)
 
     def resolve_readings(self, info):
-        return self.readings
+        # Optimized lazy loading - only fetch when specifically requested
+        return SensorReadingModel.query.filter_by(sensor_id=self.id).options(
+            joinedload(SensorReadingModel.humidity_reading),
+            joinedload(SensorReadingModel.temperature_reading),
+            joinedload(SensorReadingModel.co2_reading)
+        ).order_by(desc(SensorReadingModel.reading_time)).all()
 
     def resolve_current_location(self, info):
         for sensor_location in self.sensor_locations:
@@ -88,9 +98,12 @@ class SensorObject(SQLAlchemyObjectType):
         return None
     
     def resolve_last_reading(self, info):
-        if self.readings:
-            return max(self.readings, key=lambda r: r.reading_time)
-        return None
+        # Optimized query - get only the latest reading without loading all readings
+        return SensorReadingModel.query.filter_by(sensor_id=self.id).options(
+            joinedload(SensorReadingModel.humidity_reading),
+            joinedload(SensorReadingModel.temperature_reading),
+            joinedload(SensorReadingModel.co2_reading)
+        ).order_by(desc(SensorReadingModel.reading_time)).first()
 
     
 class SensorDataFilterInput(graphene.InputObjectType):
@@ -207,10 +220,9 @@ class Query(graphene.ObjectType):
     location = graphene.Field(LocationObject, id=graphene.Int(required=True))
 
     def resolve_sensors(self, info):
+        # Light query - only load basic sensor info and current locations
+        # Individual resolvers will handle readings data when actually requested
         return Sensor.query.options(
-            selectinload(Sensor.readings).selectinload(SensorReadingModel.humidity_reading),
-            selectinload(Sensor.readings).selectinload(SensorReadingModel.temperature_reading),
-            selectinload(Sensor.readings).selectinload(SensorReadingModel.co2_reading),
             selectinload(Sensor.sensor_locations).selectinload(SensorLocation.location)
         ).all()
 
@@ -231,19 +243,19 @@ class Query(graphene.ObjectType):
             joinedload(SensorReadingModel.humidity_reading),
             joinedload(SensorReadingModel.temperature_reading),
             joinedload(SensorReadingModel.co2_reading)
-        ).all()
+        ).order_by(desc(SensorReadingModel.reading_time)).limit(1000).all()
 
     def resolve_humidity_readings(self, info):
-        return HumidityReading.query.all()
+        return HumidityReading.query.limit(1000).all()
 
     def resolve_temperature_readings(self, info):
-        return TemperatureReading.query.all()
+        return TemperatureReading.query.limit(1000).all()
 
     def resolve_co2_readings(self, info):
-        return CO2Reading.query.all()
+        return CO2Reading.query.limit(1000).all()
 
     def resolve_error_logs(self, info):
-        return ErrorLog.query.all()
+        return ErrorLog.query.order_by(desc(ErrorLog.created_at)).limit(1000).all()
 
     def resolve_sensor(self, info, id):
         return Sensor.query.options(
@@ -273,43 +285,66 @@ class Query(graphene.ObjectType):
             query = query.filter(SensorReadingModel.reading_time >= filters.start_date)
         if filters.end_date:
             query = query.filter(SensorReadingModel.reading_time <= filters.end_date)
+        # Optimized joins - combine measurement filters into single query with outer joins
+        measurement_filters = []
+        
+        # CO2 filtering
         if filters.min_co2_ppm or filters.max_co2_ppm:
-            query = query.join(CO2Reading)
+            query = query.outerjoin(CO2Reading)
             if filters.min_co2_ppm:
-                query = query.filter(CO2Reading.co2_ppm >= filters.min_co2_ppm)
+                measurement_filters.append(CO2Reading.co2_ppm >= filters.min_co2_ppm)
             if filters.max_co2_ppm:
-                query = query.filter(CO2Reading.co2_ppm <= filters.max_co2_ppm)
+                measurement_filters.append(CO2Reading.co2_ppm <= filters.max_co2_ppm)
+        
+        # Temperature filtering
         if filters.min_temperature_celsius or filters.max_temperature_celsius:
-            query = query.join(TemperatureReading)
+            query = query.outerjoin(TemperatureReading)
             if filters.min_temperature_celsius:
-                query = query.filter(TemperatureReading.temperature_celsius >= filters.min_temperature_celsius)
+                measurement_filters.append(TemperatureReading.temperature_celsius >= filters.min_temperature_celsius)
             if filters.max_temperature_celsius:
-                query = query.filter(TemperatureReading.temperature_celsius <= filters.max_temperature_celsius)
+                measurement_filters.append(TemperatureReading.temperature_celsius <= filters.max_temperature_celsius)
+        
+        # Humidity filtering
         if filters.min_humidity_percentage or filters.max_humidity_percentage:
-            query = query.join(HumidityReading)
+            query = query.outerjoin(HumidityReading)
             if filters.min_humidity_percentage:
-                query = query.filter(HumidityReading.humidity_percentage >= filters.min_humidity_percentage)
+                measurement_filters.append(HumidityReading.humidity_percentage >= filters.min_humidity_percentage)
             if filters.max_humidity_percentage:
-                query = query.filter(HumidityReading.humidity_percentage <= filters.max_humidity_percentage)
+                measurement_filters.append(HumidityReading.humidity_percentage <= filters.max_humidity_percentage)
+        
+        # Apply all measurement filters together
+        if measurement_filters:
+            query = query.filter(and_(*measurement_filters))
         if filters.sensor_ids:
             query = query.filter(SensorReadingModel.sensor_id.in_(filters.sensor_ids))
         if filters.location_ids:
-            query = query.filter(SensorReadingModel.location_id.in_(filters.location_ids))
+            # Fix: Filter by location through sensor_locations relationship
+            query = query.join(Sensor).join(SensorLocation).filter(
+                SensorLocation.location_id.in_(filters.location_ids),
+                SensorLocation.start_time <= SensorReadingModel.reading_time,
+                or_(SensorLocation.end_time.is_(None), SensorLocation.end_time >= SensorReadingModel.reading_time)
+            )
 
         # Default ordering is by reading_time descending
         order_column = SensorReadingModel.reading_time
         order_direction = desc
         
-        # Allow overriding of default ordering
+        # Optimized ordering - reuse joins if already present, otherwise add outer joins
         if hasattr(filters, 'order_by') and filters.order_by:
             if filters.order_by == 'co2_ppm':
-                query = query.join(CO2Reading, isouter=True)
+                # Only join if not already joined for filtering
+                if not (filters.min_co2_ppm or filters.max_co2_ppm):
+                    query = query.outerjoin(CO2Reading)
                 order_column = CO2Reading.co2_ppm
             elif filters.order_by == 'temperature_celsius':
-                query = query.join(TemperatureReading, isouter=True)
+                # Only join if not already joined for filtering
+                if not (filters.min_temperature_celsius or filters.max_temperature_celsius):
+                    query = query.outerjoin(TemperatureReading)
                 order_column = TemperatureReading.temperature_celsius
             elif filters.order_by == 'humidity_percentage':
-                query = query.join(HumidityReading, isouter=True)
+                # Only join if not already joined for filtering
+                if not (filters.min_humidity_percentage or filters.max_humidity_percentage):
+                    query = query.outerjoin(HumidityReading)
                 order_column = HumidityReading.humidity_percentage
             elif filters.order_by in ['reading_time', 'id']:
                 order_column = getattr(SensorReadingModel, filters.order_by)

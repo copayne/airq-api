@@ -12,6 +12,15 @@ class Config:
     
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     
+    # Connection Pooling Configuration for Performance
+    SQLALCHEMY_ENGINE_OPTIONS = {
+        'pool_pre_ping': True,          # Verify connections before use
+        'pool_recycle': 300,            # Recycle connections after 5 minutes
+        'pool_timeout': 20,             # Connection timeout in seconds
+        'pool_size': 10,                # Number of connections to maintain
+        'max_overflow': 20              # Additional connections allowed
+    }
+    
     # Security Configuration - Required environment variable
     SECRET_KEY = os.environ.get('SECRET_KEY')
     if not SECRET_KEY:
