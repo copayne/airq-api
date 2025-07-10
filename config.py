@@ -1,5 +1,6 @@
 import os
 import secrets
+from typing import Type, Union
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -54,15 +55,38 @@ class ProductionConfig(Config):
     # Enforce strict production settings
     GRAPHQL_INTROSPECTION_ENABLED = False
     GRAPHQL_GRAPHIQL_ENABLED = False
+
+class TestingConfig(Config):
+    """Testing environment configuration with in-memory database."""
+    TESTING = True
+    SQLALCHEMY_DATABASE_URI = 'sqlite:///:memory:'
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+    WTF_CSRF_ENABLED = False
+    
+    # SQLite doesn't support connection pooling - remove those options
+    SQLALCHEMY_ENGINE_OPTIONS = {}
+    
+    # Enable GraphQL introspection and GraphiQL for testing
+    GRAPHQL_INTROSPECTION_ENABLED = True
+    GRAPHQL_GRAPHIQL_ENABLED = True
+    
+    # Relaxed security settings for testing
+    GRAPHQL_MAX_DEPTH = 20
+    GRAPHQL_MAX_COMPLEXITY = 500
+    GRAPHQL_TIMEOUT_SECONDS = 60
+    
+    # Override secret key for testing
+    SECRET_KEY = 'test-secret-key-not-for-production'
     
 # Configuration mapping
 config = {
     'development': DevelopmentConfig,
     'production': ProductionConfig,
+    'testing': TestingConfig,
     'default': Config
 }
 
-def get_config():
+def get_config() -> Type[Config]:
     """Get configuration class based on FLASK_ENV."""
     env = os.getenv('FLASK_ENV', 'production')
     return config.get(env, config['default'])

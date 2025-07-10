@@ -2,7 +2,8 @@ from flask import Flask
 from flask_sqlalchemy import SQLAlchemy
 from flask_graphql import GraphQLView
 from flask_cors import CORS
-from config import get_config
+from typing import Optional, Type
+from config import get_config, Config
 from app.graphql_security import GraphQLSecurityMiddleware
 from app.logging_config import setup_logging
 import logging
@@ -10,7 +11,7 @@ import os
 
 db = SQLAlchemy()
 
-def create_app(config_class=None):
+def create_app(config_class: Optional[Type[Config]] = None) -> Flask:
     app = Flask(__name__)
     
     # Use environment-based configuration if no config class provided

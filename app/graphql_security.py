@@ -6,16 +6,17 @@ Implements query depth limiting, complexity analysis, and timeout protection
 import graphene
 import signal
 import time
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Callable, Type
 from graphql import GraphQLError, parse, validate
 from graphql.validation.rules.base import ValidationRule
 from graphql.language import ast
+from flask import Flask
 import logging
 
 logger = logging.getLogger(__name__)
 
 
-def create_depth_limit_validator(max_depth: int):
+def create_depth_limit_validator(max_depth: int) -> Type[ValidationRule]:
     """
     Creates a depth limiting validation rule for older GraphQL versions.
     """

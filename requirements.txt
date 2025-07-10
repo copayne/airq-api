@@ -7,3 +7,10 @@ graphene-sqlalchemy==2.3.0
 Flask-GraphQL==2.0.1
 Werkzeug==2.2.2
 python-dotenv==1.0.0
+
+# Testing dependencies
+pytest==7.4.0
+pytest-flask==1.2.0
+pytest-mock==3.11.1
+pytest-cov==4.1.0
+factory-boy==3.3.0

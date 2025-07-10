@@ -1,5 +1,6 @@
 import graphene
 from graphene_sqlalchemy import SQLAlchemyObjectType
+from typing import Optional, List
 from app.models import CO2Reading, ErrorLog, HumidityReading, Location, Sensor, SensorLocation, SensorReading as SensorReadingModel, TemperatureReading
 from app import db
 from sqlalchemy import and_, or_, desc, asc
@@ -14,6 +15,10 @@ class LocationObject(SQLAlchemyObjectType):
     current_sensors = graphene.List(lambda: SensorObject)
 
     def resolve_readings(self, info):
+        """Get all sensor readings taken at this location.
+        
+        Filters readings by checking if they were taken when sensors were active at this location.
+        """
         # Get all readings from sensors at this location via relationships
         readings = []
         for sensor_location in self.sensor_locations:
@@ -25,6 +30,7 @@ class LocationObject(SQLAlchemyObjectType):
         return readings
 
     def resolve_current_sensors(self, info):
+        """Get all sensors currently active at this location."""
         return [sl.sensor for sl in self.sensor_locations if sl.is_current]
 
 class SensorLocationObject(SQLAlchemyObjectType):
@@ -35,9 +41,11 @@ class SensorLocationObject(SQLAlchemyObjectType):
     location = graphene.Field(lambda: LocationObject)
 
     def resolve_sensor(self, info):
+        """Get the sensor associated with this location assignment."""
         return self.sensor
 
     def resolve_location(self, info):
+        """Get the location associated with this sensor assignment."""
         return self.location
 
 class SensorReadingObject(SQLAlchemyObjectType):
@@ -63,6 +71,10 @@ class SensorReadingObject(SQLAlchemyObjectType):
         return self.co2_reading
     
     def resolve_location(self, info):
+        """Get the location where this sensor reading was taken.
+        
+        Uses optimized database query to find the location based on reading timestamp.
+        """
         # Optimized database query instead of Python loop
         sensor_location = SensorLocation.query.filter(
             SensorLocation.sensor_id == self.sensor_id,
@@ -84,6 +96,10 @@ class SensorObject(SQLAlchemyObjectType):
     last_reading = graphene.Field(SensorReadingObject)
 
     def resolve_readings(self, info):
+        """Get all readings from this sensor with optimized loading.
+        
+        Uses eager loading for measurement data to prevent N+1 queries.
+        """
         # Optimized lazy loading - only fetch when specifically requested
         return SensorReadingModel.query.filter_by(sensor_id=self.id).options(
             joinedload(SensorReadingModel.humidity_reading),
@@ -92,12 +108,17 @@ class SensorObject(SQLAlchemyObjectType):
         ).order_by(desc(SensorReadingModel.reading_time)).all()
 
     def resolve_current_location(self, info):
+        """Get the current location of this sensor."""
         for sensor_location in self.sensor_locations:
             if sensor_location.is_current:
                 return sensor_location.location
         return None
     
     def resolve_last_reading(self, info):
+        """Get the most recent reading from this sensor.
+        
+        Uses optimized query to fetch only the latest reading with measurements.
+        """
         # Optimized query - get only the latest reading without loading all readings
         return SensorReadingModel.query.filter_by(sensor_id=self.id).options(
             joinedload(SensorReadingModel.humidity_reading),
@@ -138,6 +159,11 @@ class CreateSensorReading(graphene.Mutation):
 
     @staticmethod
     def mutate(root, info, input):
+        """Create a new sensor reading with associated measurement data.
+        
+        Creates a base sensor reading record and associated measurement records
+        for any provided sensor data (humidity, temperature, CO2).
+        """
         # Create the sensor reading with just the sensor_id
         sensor_reading = SensorReadingModel(
             sensor_id=input.sensor_id
@@ -236,6 +262,11 @@ class Query(graphene.ObjectType):
     location = graphene.Field(LocationObject, id=graphene.Int(required=True))
 
     def resolve_sensors(self, info):
+        """Get all sensors with optimized loading.
+        
+        Loads basic sensor info and current locations. Individual resolvers
+        handle readings data when specifically requested to avoid over-fetching.
+        """
         # Light query - only load basic sensor info and current locations
         # Individual resolvers will handle readings data when actually requested
         return Sensor.query.options(
@@ -243,6 +274,7 @@ class Query(graphene.ObjectType):
         ).all()
 
     def resolve_locations(self, info):
+        """Get all locations with their associated sensors."""
         return Location.query.options(
             selectinload(Location.sensor_locations).selectinload(SensorLocation.sensor)
         ).all()
@@ -254,6 +286,10 @@ class Query(graphene.ObjectType):
         ).all()
 
     def resolve_sensor_readings(self, info):
+        """Get recent sensor readings with all measurement data.
+        
+        Limited to 1000 most recent readings with eager loading for performance.
+        """
         return SensorReadingModel.query.options(
             joinedload(SensorReadingModel.sensor).selectinload(Sensor.sensor_locations).selectinload(SensorLocation.location),
             joinedload(SensorReadingModel.humidity_reading),
@@ -289,6 +325,11 @@ class Query(graphene.ObjectType):
     filtered_sensor_readings = graphene.List(SensorReadingObject, filters=SensorDataFilterInput(required=True))
 
     def resolve_filtered_sensor_readings(self, info, filters):
+        """Get sensor readings filtered by various criteria.
+        
+        Supports filtering by date range, measurement values, sensors, locations,
+        with pagination and ordering. Uses optimized queries to prevent N+1 issues.
+        """
         # Start with optimized eager loading
         query = SensorReadingModel.query.options(
             joinedload(SensorReadingModel.sensor).selectinload(Sensor.sensor_locations).selectinload(SensorLocation.location),
