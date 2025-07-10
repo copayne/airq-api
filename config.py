@@ -1,5 +1,6 @@
 import os
 import secrets
+from typing import Type, Union
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -62,7 +63,7 @@ config = {
     'default': Config
 }
 
-def get_config():
+def get_config() -> Type[Config]:
     """Get configuration class based on FLASK_ENV."""
     env = os.getenv('FLASK_ENV', 'production')
     return config.get(env, config['default'])

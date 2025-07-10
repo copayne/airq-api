@@ -7,18 +7,20 @@ import json
 import traceback
 import uuid
 from datetime import datetime
-from flask import request, has_request_context
+from typing import Optional, Dict, Any
+from flask import request, has_request_context, Flask
+from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.exc import SQLAlchemyError
 
 class DatabaseLogHandler(logging.Handler):
     """Custom logging handler that writes logs to the ApplicationErrorLog table"""
     
-    def __init__(self, db, level=logging.NOTSET):
+    def __init__(self, db: SQLAlchemy, level: int = logging.NOTSET) -> None:
         super().__init__(level)
         self.db = db
         self.request_id = None
         
-    def emit(self, record):
+    def emit(self, record: logging.LogRecord) -> None:
         """Write log record to database"""
         try:
             # Import here to avoid circular imports
@@ -72,16 +74,19 @@ class DatabaseLogHandler(logging.Handler):
             
         except SQLAlchemyError as e:
             # Avoid infinite recursion by not logging database errors
-            print(f"Database logging error: {e}")
+            # Use stderr to ensure error is captured in production logs
+            import sys
+            sys.stderr.write(f"Database logging error: {e}\n")
             self.db.session.rollback()
         except Exception as e:
             # Handle other logging errors
-            print(f"Logging handler error: {e}")
+            import sys
+            sys.stderr.write(f"Logging handler error: {e}\n")
 
 class RequestIDFilter(logging.Filter):
     """Filter to add request ID to log records"""
     
-    def filter(self, record):
+    def filter(self, record: logging.LogRecord) -> bool:
         if has_request_context():
             # Get or create request ID
             if not hasattr(request, 'request_id'):
@@ -91,7 +96,7 @@ class RequestIDFilter(logging.Filter):
             record.request_id = None
         return True
 
-def setup_logging(app, db):
+def setup_logging(app: Flask, db: SQLAlchemy) -> logging.Logger:
     """Setup application logging configuration"""
     
     # Create custom formatter
@@ -125,7 +130,7 @@ def setup_logging(app, db):
     
     return root_logger
 
-def log_error(message, context=None, exc_info=None, level=logging.ERROR):
+def log_error(message: str, context: Optional[Dict[str, Any]] = None, exc_info: Optional[bool] = None, level: int = logging.ERROR) -> None:
     """Helper function to log errors with context"""
     logger = logging.getLogger(__name__)
     
@@ -136,7 +141,7 @@ def log_error(message, context=None, exc_info=None, level=logging.ERROR):
     
     logger.log(level, message, exc_info=exc_info, extra=extra)
 
-def log_performance(operation, duration, context=None):
+def log_performance(operation: str, duration: float, context: Optional[Dict[str, Any]] = None) -> None:
     """Helper function to log performance metrics"""
     logger = logging.getLogger('performance')
     
