@@ -75,5 +75,84 @@ Run the following command to initialize the database
 ```python3 run.py```
 
 ### Check status
-- Open browser and navigate to http://127.0.0.1/graphql
+- Open browser and navigate to http://127.0.0.1:5000/graphql
 - Should open to graphql utility tool.
+
+## Testing
+
+The project includes comprehensive test coverage with unit tests, integration tests, and security tests.
+
+### Prerequisites
+Make sure you have activated your virtual environment and installed all dependencies:
+```bash
+source {{env_name}}/bin/activate
+pip install -r requirements.txt
+```
+
+### Running Tests
+
+#### Run All Tests
+```bash
+pytest
+```
+
+#### Run Tests with Coverage Report
+```bash
+pytest --cov=app --cov-report=term-missing --cov-report=html
+```
+
+#### Run Specific Test Categories
+```bash
+# Unit tests only
+pytest -m unit
+
+# Integration tests only  
+pytest -m integration
+
+# Run tests in a specific file
+pytest tests/unit/test_models.py
+
+# Run a specific test
+pytest tests/integration/test_graphql_api.py::TestGraphQLQueries::test_sensors_query
+```
+
+#### Run Tests in Verbose Mode
+```bash
+pytest -v
+```
+
+### Test Structure
+
+- **`tests/unit/`** - Unit tests for database models and business logic
+- **`tests/integration/`** - Integration tests for GraphQL API endpoints
+- **`tests/conftest.py`** - Test configuration and fixtures
+
+### Test Database
+
+Tests use an in-memory SQLite database that is automatically created and destroyed for each test session. This ensures tests are fast and isolated.
+
+### Coverage Reports
+
+After running tests with coverage, you can view the HTML coverage report:
+```bash
+open htmlcov/index.html  # On macOS
+xdg-open htmlcov/index.html  # On Linux
+```
+
+The project maintains a minimum coverage threshold of 80%.
+
+### Test Fixtures
+
+The test suite includes comprehensive fixtures for:
+- Sample sensors, locations, and sensor readings
+- Complete measurement data (humidity, temperature, CO2)
+- GraphQL query execution helpers
+- Database session management with automatic rollback
+
+### Security Testing
+
+Integration tests include security verification for:
+- GraphQL query depth limiting
+- Query complexity analysis
+- Malformed query handling
+- Missing parameter validation
