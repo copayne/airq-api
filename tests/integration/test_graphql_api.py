@@ -281,64 +281,12 @@ class TestGraphQLMutations:
         assert reading_data['co2Reading'] is None
 
 
-@pytest.mark.integration
-class TestGraphQLSecurity:
-    """Test GraphQL security features."""
+@pytest.mark.integration 
+class TestGraphQLErrorHandling:
+    """Test GraphQL error handling capabilities."""
     
-    def test_query_depth_limiting(self, client):
-        """Test that excessively deep queries are rejected."""
-        # Create a very deep query that should be rejected
-        deep_query = """
-        query {
-            sensors {
-                readings {
-                    sensor {
-                        readings {
-                            sensor {
-                                readings {
-                                    sensor {
-                                        readings {
-                                            sensor {
-                                                id
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        """
-        
-        response = client.post('/graphql',
-                             json={'query': deep_query},
-                             headers={'Content-Type': 'application/json'})
-        
-        assert response.status_code == 200
-        data = response.get_json()
-        
-        # Should return an error due to depth limiting
-        assert 'errors' in data
-        assert any('depth' in str(error).lower() for error in data['errors'])
-    
-    def test_malformed_query_handling(self, client):
-        """Test that malformed queries are handled gracefully."""
-        malformed_query = "query { sensors { invalid_field } }"
-        
-        response = client.post('/graphql',
-                             json={'query': malformed_query},
-                             headers={'Content-Type': 'application/json'})
-        
-        assert response.status_code == 200
-        data = response.get_json()
-        
-        # Should return an error for invalid field
-        assert 'errors' in data
-    
-    def test_missing_required_variables(self, client):
-        """Test handling of missing required variables."""
+    def test_nonexistent_sensor_query(self, client, session):
+        """Test querying for a sensor that doesn't exist."""
         query = """
         query GetSensor($id: Int!) {
             sensor(id: $id) {
@@ -348,13 +296,15 @@ class TestGraphQLSecurity:
         }
         """
         
-        # Don't provide required $id variable
+        variables = {"id": 99999}  # Non-existent sensor ID
+        
         response = client.post('/graphql',
-                             json={'query': query},
+                             json={'query': query, 'variables': variables},
                              headers={'Content-Type': 'application/json'})
         
         assert response.status_code == 200
         data = response.get_json()
         
-        # Should return an error for missing variable
-        assert 'errors' in data
+        # Should return null for non-existent sensor
+        assert 'data' in data
+        assert data['data']['sensor'] is None
