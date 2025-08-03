@@ -8,6 +8,11 @@ Flask-GraphQL==2.0.1
 Werkzeug==2.2.2
 python-dotenv==1.0.0
 
+# Authentication dependencies
+PyJWT==2.8.0
+passlib==1.7.4
+bcrypt==4.0.1
+
 # Testing dependencies
 pytest==7.4.0
 pytest-flask==1.2.0

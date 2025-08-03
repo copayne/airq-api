@@ -1,0 +1,643 @@
+{
+	"info": {
+		"_postman_id": "airq-api-collection",
+		"name": "AirQ API - Hudson Air Quality",
+		"description": "Complete collection for the Hudson Air Quality GraphQL API including authentication, sensor readings, and data queries.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Authentication",
+			"item": [
+				{
+					"name": "Register User",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"query\": \"mutation RegisterUser($input: RegisterInput!) { registerUser(input: $input) { success message user { id username email role fullName } token } }\",\n  \"variables\": {\n    \"input\": {\n      \"username\": \"{{username}}\",\n      \"email\": \"{{email}}\",\n      \"password\": \"{{password}}\",\n      \"firstName\": \"{{firstName}}\",\n      \"lastName\": \"{{lastName}}\"\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/graphql",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"graphql"
+							]
+						},
+						"description": "Register a new user account and receive a JWT token."
+					},
+					"response": [],
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 200) {",
+									"    const response = pm.response.json();",
+									"    if (response.data && response.data.registerUser && response.data.registerUser.token) {",
+									"        pm.environment.set('jwt_token', response.data.registerUser.token);",
+									"        console.log('JWT token saved to environment');",
+									"    }",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "Login User",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"query\": \"mutation LoginUser($input: LoginInput!) { loginUser(input: $input) { success message user { id username email role } token } }\",\n  \"variables\": {\n    \"input\": {\n      \"usernameOrEmail\": \"{{usernameOrEmail}}\",\n      \"password\": \"{{password}}\"\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/graphql",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"graphql"
+							]
+						},
+						"description": "Login with username/email and password to receive a JWT token."
+					},
+					"response": [],
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 200) {",
+									"    const response = pm.response.json();",
+									"    if (response.data && response.data.loginUser && response.data.loginUser.token) {",
+									"        pm.environment.set('jwt_token', response.data.loginUser.token);",
+									"        console.log('JWT token saved to environment');",
+									"    }",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "Get Current User",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Authorization",
+								"value": "Bearer {{jwt_token}}"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"query\": \"query GetCurrentUser { me { id username email role fullName createdAt lastLogin } }\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/graphql",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"graphql"
+							]
+						},
+						"description": "Get information about the currently authenticated user."
+					},
+					"response": []
+				}
+			],
+			"description": "Authentication endpoints for user registration, login, and profile management."
+		},
+		{
+			"name": "Sensors",
+			"item": [
+				{
+					"name": "Get All Sensors",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Authorization",
+								"value": "Bearer {{jwt_token}}"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"query\": \"query GetSensors { sensors { id name model isActive currentLocation { id name } lastReading { id readingTime humidityReading { humidityPercentage } temperatureReading { temperatureCelsius } co2Reading { co2Ppm } } } }\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/graphql",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"graphql"
+							]
+						},
+						"description": "Get all sensors with their current location and last reading."
+					},
+					"response": []
+				},
+				{
+					"name": "Get Sensor by ID",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Authorization",
+								"value": "Bearer {{jwt_token}}"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"query\": \"query GetSensor($id: Int!) { sensor(id: $id) { id name model isActive currentLocation { name } readings { id readingTime humidityReading { humidityPercentage } temperatureReading { temperatureCelsius } co2Reading { co2Ppm } } } }\",\n  \"variables\": {\n    \"id\": {{sensorId}}\n  }\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/graphql",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"graphql"
+							]
+						},
+						"description": "Get detailed information about a specific sensor including all its readings."
+					},
+					"response": []
+				}
+			],
+			"description": "Sensor management and information queries."
+		},
+		{
+			"name": "Locations",
+			"item": [
+				{
+					"name": "Get All Locations",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Authorization",
+								"value": "Bearer {{jwt_token}}"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"query\": \"query GetLocations { locations { id name description currentSensors { id name model isActive } } }\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/graphql",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"graphql"
+							]
+						},
+						"description": "Get all locations with their currently assigned sensors."
+					},
+					"response": []
+				},
+				{
+					"name": "Get Location by ID",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Authorization",
+								"value": "Bearer {{jwt_token}}"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"query\": \"query GetLocation($id: Int!) { location(id: $id) { id name description currentSensors { id name model } readings { id readingTime sensor { name } humidityReading { humidityPercentage } temperatureReading { temperatureCelsius } co2Reading { co2Ppm } } } }\",\n  \"variables\": {\n    \"id\": {{locationId}}\n  }\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/graphql",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"graphql"
+							]
+						},
+						"description": "Get detailed information about a specific location including readings taken there."
+					},
+					"response": []
+				}
+			],
+			"description": "Location management and information queries."
+		},
+		{
+			"name": "Sensor Readings",
+			"item": [
+				{
+					"name": "Create Sensor Reading",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Authorization",
+								"value": "Bearer {{jwt_token}}"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"query\": \"mutation CreateSensorReading($input: CreateSensorReadingInput!) { createSensorReading(input: $input) { success message errors sensorReading { id readingTime sensor { name } humidityReading { humidityPercentage } temperatureReading { temperatureCelsius } co2Reading { co2Ppm } } } }\",\n  \"variables\": {\n    \"input\": {\n      \"sensorId\": {{sensorId}},\n      \"humidityPercentage\": {{humidityPercentage}},\n      \"temperatureCelsius\": {{temperatureCelsius}},\n      \"co2Ppm\": {{co2Ppm}}\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/graphql",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"graphql"
+							]
+						},
+						"description": "Create a new sensor reading with humidity, temperature, and/or CO2 data."
+					},
+					"response": []
+				},
+				{
+					"name": "Get Recent Readings",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Authorization",
+								"value": "Bearer {{jwt_token}}"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"query\": \"query GetRecentReadings { sensorReadings { id readingTime sensor { name model } location { name } humidityReading { humidityPercentage } temperatureReading { temperatureCelsius } co2Reading { co2Ppm } } }\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/graphql",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"graphql"
+							]
+						},
+						"description": "Get the most recent 1000 sensor readings from all sensors."
+					},
+					"response": []
+				},
+				{
+					"name": "Get Filtered Readings - By Date Range",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Authorization",
+								"value": "Bearer {{jwt_token}}"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"query\": \"query GetFilteredReadings($filters: SensorDataFilterInput!) { filteredSensorReadings(filters: $filters) { id readingTime sensor { name } location { name } humidityReading { humidityPercentage } temperatureReading { temperatureCelsius } co2Reading { co2Ppm } } }\",\n  \"variables\": {\n    \"filters\": {\n      \"startDate\": \"{{startDate}}\",\n      \"endDate\": \"{{endDate}}\",\n      \"orderBy\": \"reading_time\",\n      \"orderDirection\": \"desc\",\n      \"limit\": 100\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/graphql",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"graphql"
+							]
+						},
+						"description": "Get sensor readings filtered by date range."
+					},
+					"response": []
+				},
+				{
+					"name": "Get Filtered Readings - By Location",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Authorization",
+								"value": "Bearer {{jwt_token}}"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"query\": \"query GetFilteredReadings($filters: SensorDataFilterInput!) { filteredSensorReadings(filters: $filters) { id readingTime sensor { name } location { name } humidityReading { humidityPercentage } temperatureReading { temperatureCelsius } co2Reading { co2Ppm } } }\",\n  \"variables\": {\n    \"filters\": {\n      \"locationIds\": [{{locationId}}],\n      \"orderBy\": \"reading_time\",\n      \"orderDirection\": \"desc\",\n      \"limit\": 50\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/graphql",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"graphql"
+							]
+						},
+						"description": "Get sensor readings from a specific location."
+					},
+					"response": []
+				},
+				{
+					"name": "Get High CO2 Readings",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Authorization",
+								"value": "Bearer {{jwt_token}}"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"query\": \"query GetHighCO2Readings($filters: SensorDataFilterInput!) { filteredSensorReadings(filters: $filters) { id readingTime sensor { name } location { name } co2Reading { co2Ppm } } }\",\n  \"variables\": {\n    \"filters\": {\n      \"minCo2Ppm\": 1000,\n      \"orderBy\": \"co2_ppm\",\n      \"orderDirection\": \"desc\",\n      \"limit\": 50\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/graphql",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"graphql"
+							]
+						},
+						"description": "Get readings with high CO2 levels (above 1000 ppm)."
+					},
+					"response": []
+				},
+				{
+					"name": "Get Temperature Range Readings",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Authorization",
+								"value": "Bearer {{jwt_token}}"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"query\": \"query GetTemperatureRangeReadings($filters: SensorDataFilterInput!) { filteredSensorReadings(filters: $filters) { id readingTime sensor { name } location { name } temperatureReading { temperatureCelsius } } }\",\n  \"variables\": {\n    \"filters\": {\n      \"minTemperatureCelsius\": {{minTemp}},\n      \"maxTemperatureCelsius\": {{maxTemp}},\n      \"orderBy\": \"temperature_celsius\",\n      \"orderDirection\": \"desc\",\n      \"limit\": 100\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/graphql",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"graphql"
+							]
+						},
+						"description": "Get readings within a specific temperature range."
+					},
+					"response": []
+				}
+			],
+			"description": "Sensor reading creation and queries with various filtering options."
+		},
+		{
+			"name": "Admin",
+			"item": [
+				{
+					"name": "Get All Users (Admin Only)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Authorization",
+								"value": "Bearer {{jwt_token}}"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"query\": \"query GetAllUsers { users { id username email role fullName isActive createdAt lastLogin } }\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/graphql",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"graphql"
+							]
+						},
+						"description": "Get all users in the system (requires admin role)."
+					},
+					"response": []
+				},
+				{
+					"name": "Get User by ID (Admin Only)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Authorization",
+								"value": "Bearer {{jwt_token}}"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"query\": \"query GetUser($id: Int!) { user(id: $id) { id username email role fullName isActive createdAt lastLogin } }\",\n  \"variables\": {\n    \"id\": {{userId}}\n  }\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/graphql",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"graphql"
+							]
+						},
+						"description": "Get a specific user by ID (requires admin role)."
+					},
+					"response": []
+				}
+			],
+			"description": "Administrative endpoints requiring admin role permissions."
+		}
+	],
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		},
+		{
+			"listen": "test",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		}
+	],
+	"variable": [
+		{
+			"key": "baseUrl",
+			"value": "http://127.0.0.1:5000",
+			"type": "string"
+		},
+		{
+			"key": "username",
+			"value": "testuser",
+			"type": "string"
+		},
+		{
+			"key": "email",
+			"value": "test@example.com",
+			"type": "string"
+		},
+		{
+			"key": "password",
+			"value": "password123",
+			"type": "string"
+		},
+		{
+			"key": "firstName",
+			"value": "John",
+			"type": "string"
+		},
+		{
+			"key": "lastName",
+			"value": "Doe",
+			"type": "string"
+		},
+		{
+			"key": "usernameOrEmail",
+			"value": "testuser",
+			"type": "string"
+		},
+		{
+			"key": "sensorId",
+			"value": 1,
+			"type": "number"
+		},
+		{
+			"key": "locationId",
+			"value": 1,
+			"type": "number"
+		},
+		{
+			"key": "userId",
+			"value": 1,
+			"type": "number"
+		},
+		{
+			"key": "humidityPercentage",
+			"value": 65.5,
+			"type": "number"
+		},
+		{
+			"key": "temperatureCelsius",
+			"value": 23.2,
+			"type": "number"
+		},
+		{
+			"key": "co2Ppm",
+			"value": 1200,
+			"type": "number"
+		},
+		{
+			"key": "startDate",
+			"value": "2024-01-01T00:00:00Z",
+			"type": "string"
+		},
+		{
+			"key": "endDate",
+			"value": "2024-01-31T23:59:59Z",
+			"type": "string"
+		},
+		{
+			"key": "minTemp",
+			"value": 20,
+			"type": "number"
+		},
+		{
+			"key": "maxTemp",
+			"value": 30,
+			"type": "number"
+		},
+		{
+			"key": "jwt_token",
+			"value": "",
+			"type": "string"
+		}
+	]
+}

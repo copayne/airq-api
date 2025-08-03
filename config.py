@@ -41,6 +41,17 @@ class Config:
     GRAPHQL_MAX_COMPLEXITY = int(os.getenv('GRAPHQL_MAX_COMPLEXITY', '150'))
     GRAPHQL_TIMEOUT_SECONDS = int(os.getenv('GRAPHQL_TIMEOUT', '30'))
     GRAPHQL_RATE_LIMIT_PER_MINUTE = int(os.getenv('GRAPHQL_RATE_LIMIT_PER_MINUTE', '100'))
+    
+    # Email Configuration
+    SMTP_SERVER = os.getenv('SMTP_SERVER', 'localhost')
+    SMTP_PORT = int(os.getenv('SMTP_PORT', '587'))
+    SMTP_USERNAME = os.getenv('SMTP_USERNAME')
+    SMTP_PASSWORD = os.getenv('SMTP_PASSWORD')
+    SMTP_USE_TLS = os.getenv('SMTP_USE_TLS', 'true').lower() == 'true'
+    FROM_EMAIL = os.getenv('FROM_EMAIL', 'noreply@airq.local')
+    BASE_URL = os.getenv('BASE_URL', 'http://localhost:3000')
+    MOCK_EMAIL = os.getenv('MOCK_EMAIL', 'true').lower() == 'true'
+    SAVE_MOCK_EMAILS = os.getenv('SAVE_MOCK_EMAILS', 'false').lower() == 'true'
 
 class DevelopmentConfig(Config):
     """Development environment configuration with relaxed security for testing."""

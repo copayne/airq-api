@@ -1,11 +1,15 @@
 import graphene
 from graphene_sqlalchemy import SQLAlchemyObjectType
-from typing import Optional, List
-from app.models import CO2Reading, ErrorLog, HumidityReading, Location, Sensor, SensorLocation, SensorReading as SensorReadingModel, TemperatureReading
+from typing import Optional, List, Any, Dict
+from app.models import CO2Reading, ErrorLog, HumidityReading, Location, Sensor, SensorLocation, SensorReading as SensorReadingModel, TemperatureReading, User
 from app import db
 from sqlalchemy import and_, or_, desc, asc
 from sqlalchemy.orm import joinedload, selectinload
 from datetime import datetime
+import logging
+from app.auth import require_admin, require_user, get_user_from_context
+
+logger = logging.getLogger(__name__)
 
 class LocationObject(SQLAlchemyObjectType):
     class Meta:
@@ -14,7 +18,7 @@ class LocationObject(SQLAlchemyObjectType):
     readings = graphene.List(lambda: SensorReadingObject)
     current_sensors = graphene.List(lambda: SensorObject)
 
-    def resolve_readings(self, info):
+    def resolve_readings(self, info: Any) -> List[SensorReadingModel]:
         """Get all sensor readings taken at this location.
         
         Filters readings by checking if they were taken when sensors were active at this location.
@@ -29,7 +33,7 @@ class LocationObject(SQLAlchemyObjectType):
                     readings.append(reading)
         return readings
 
-    def resolve_current_sensors(self, info):
+    def resolve_current_sensors(self, info: Any) -> List[Sensor]:
         """Get all sensors currently active at this location."""
         return [sl.sensor for sl in self.sensor_locations if sl.is_current]
 
@@ -40,11 +44,11 @@ class SensorLocationObject(SQLAlchemyObjectType):
     sensor = graphene.Field(lambda: SensorObject)
     location = graphene.Field(lambda: LocationObject)
 
-    def resolve_sensor(self, info):
+    def resolve_sensor(self, info: Any) -> Sensor:
         """Get the sensor associated with this location assignment."""
         return self.sensor
 
-    def resolve_location(self, info):
+    def resolve_location(self, info: Any) -> Location:
         """Get the location associated with this sensor assignment."""
         return self.location
 
@@ -58,19 +62,19 @@ class SensorReadingObject(SQLAlchemyObjectType):
     co2_reading = graphene.Field(lambda: CO2ReadingObject)
     location = graphene.Field(lambda: LocationObject)
 
-    def resolve_sensor(self, info):
+    def resolve_sensor(self, info: Any) -> Sensor:
         return self.sensor
 
-    def resolve_humidity_reading(self, info):
+    def resolve_humidity_reading(self, info: Any) -> Optional[HumidityReading]:
         return self.humidity_reading
 
-    def resolve_temperature_reading(self, info):
+    def resolve_temperature_reading(self, info: Any) -> Optional[TemperatureReading]:
         return self.temperature_reading
 
-    def resolve_co2_reading(self, info):
+    def resolve_co2_reading(self, info: Any) -> Optional[CO2Reading]:
         return self.co2_reading
     
-    def resolve_location(self, info):
+    def resolve_location(self, info: Any) -> Optional[Location]:
         """Get the location where this sensor reading was taken.
         
         Uses optimized database query to find the location based on reading timestamp.
@@ -95,7 +99,7 @@ class SensorObject(SQLAlchemyObjectType):
     current_location = graphene.Field(lambda: LocationObject)
     last_reading = graphene.Field(SensorReadingObject)
 
-    def resolve_readings(self, info):
+    def resolve_readings(self, info: Any) -> List[SensorReadingModel]:
         """Get all readings from this sensor with optimized loading.
         
         Uses eager loading for measurement data to prevent N+1 queries.
@@ -107,14 +111,14 @@ class SensorObject(SQLAlchemyObjectType):
             joinedload(SensorReadingModel.co2_reading)
         ).order_by(desc(SensorReadingModel.reading_time)).all()
 
-    def resolve_current_location(self, info):
+    def resolve_current_location(self, info: Any) -> Optional[Location]:
         """Get the current location of this sensor."""
         for sensor_location in self.sensor_locations:
             if sensor_location.is_current:
                 return sensor_location.location
         return None
     
-    def resolve_last_reading(self, info):
+    def resolve_last_reading(self, info: Any) -> Optional[SensorReadingModel]:
         """Get the most recent reading from this sensor.
         
         Uses optimized query to fetch only the latest reading with measurements.
@@ -156,43 +160,104 @@ class CreateSensorReading(graphene.Mutation):
         input = CreateSensorReadingInput(required=True)
 
     sensor_reading = graphene.Field(lambda: SensorReadingObject)
+    success = graphene.Boolean()
+    message = graphene.String()
+    errors = graphene.List(graphene.String)
 
     @staticmethod
-    def mutate(root, info, input):
-        """Create a new sensor reading with associated measurement data.
+    def mutate(root: Any, info: Any, input: CreateSensorReadingInput) -> 'CreateSensorReading':
+        """Create a new sensor reading with comprehensive validation.
         
-        Creates a base sensor reading record and associated measurement records
-        for any provided sensor data (humidity, temperature, CO2).
+        Validates input data against reasonable sensor ranges and constraints
+        before creating database records. Returns detailed error information
+        for validation failures.
         """
-        # Create the sensor reading with just the sensor_id
-        sensor_reading = SensorReadingModel(
-            sensor_id=input.sensor_id
+        from app.validation import SensorDataValidator
+        
+        # Validate input data
+        validator = SensorDataValidator()
+        validation_result = validator.validate_sensor_reading_input(
+            sensor_id=input.sensor_id,
+            humidity_percentage=input.humidity_percentage,
+            temperature_celsius=input.temperature_celsius,
+            co2_ppm=input.co2_ppm
         )
         
-        db.session.add(sensor_reading)
-        db.session.flush()  # This assigns an ID without committing
-        
-        # Create the specific readings as before
-        if input.humidity_percentage is not None:
-            humidity_reading = HumidityReading(reading_id=sensor_reading.id, humidity_percentage=input.humidity_percentage)
-            db.session.add(humidity_reading)
-
-        if input.temperature_celsius is not None:
-            temperature_reading = TemperatureReading(reading_id=sensor_reading.id, temperature_celsius=input.temperature_celsius)
-            db.session.add(temperature_reading)
-
-        if input.co2_ppm is not None:
-            co2_reading = CO2Reading(reading_id=sensor_reading.id, co2_ppm=input.co2_ppm)
-            db.session.add(co2_reading)
+        # Return validation errors if any
+        if not validation_result.is_valid:
+            logger.warning(
+                "Sensor reading validation failed",
+                extra={
+                    'extra_context': {
+                        'sensor_id': input.sensor_id,
+                        'validation_errors': validation_result.error_messages,
+                        'operation': 'create_sensor_reading_validation'
+                    }
+                }
+            )
+            return CreateSensorReading(
+                sensor_reading=None,
+                success=False,
+                message="Validation failed",
+                errors=validation_result.error_messages
+            )
         
         try:
+            # Create the sensor reading with validated data
+            sensor_reading = SensorReadingModel(
+                sensor_id=input.sensor_id
+            )
+            
+            db.session.add(sensor_reading)
+            db.session.flush()  # This assigns an ID without committing
+            
+            # Create the specific readings with validated data
+            if input.humidity_percentage is not None:
+                humidity_reading = HumidityReading(
+                    reading_id=sensor_reading.id, 
+                    humidity_percentage=input.humidity_percentage
+                )
+                db.session.add(humidity_reading)
+
+            if input.temperature_celsius is not None:
+                temperature_reading = TemperatureReading(
+                    reading_id=sensor_reading.id, 
+                    temperature_celsius=input.temperature_celsius
+                )
+                db.session.add(temperature_reading)
+
+            if input.co2_ppm is not None:
+                co2_reading = CO2Reading(
+                    reading_id=sensor_reading.id, 
+                    co2_ppm=input.co2_ppm
+                )
+                db.session.add(co2_reading)
+            
             db.session.commit()
-            return CreateSensorReading(sensor_reading=sensor_reading)
+            
+            logger.info(
+                "Sensor reading created successfully",
+                extra={
+                    'extra_context': {
+                        'sensor_id': input.sensor_id,
+                        'reading_id': sensor_reading.id,
+                        'has_humidity': input.humidity_percentage is not None,
+                        'has_temperature': input.temperature_celsius is not None,
+                        'has_co2': input.co2_ppm is not None,
+                        'operation': 'create_sensor_reading_success'
+                    }
+                }
+            )
+            
+            return CreateSensorReading(
+                sensor_reading=sensor_reading,
+                success=True,
+                message="Sensor reading created successfully",
+                errors=[]
+            )
+            
         except Exception as e:
             db.session.rollback()
-            # Log error with context for debugging
-            import logging
-            logger = logging.getLogger(__name__)
             logger.error(
                 "Failed to save sensor reading",
                 exc_info=True,
@@ -202,12 +267,17 @@ class CreateSensorReading(graphene.Mutation):
                         'has_humidity': input.humidity_percentage is not None,
                         'has_temperature': input.temperature_celsius is not None,
                         'has_co2': input.co2_ppm is not None,
-                        'operation': 'create_sensor_reading'
+                        'operation': 'create_sensor_reading_database_error'
                     }
                 }
             )
-            # Return sanitized error message for security
-            raise Exception("Failed to save sensor reading. Please try again.")
+            
+            return CreateSensorReading(
+                sensor_reading=None,
+                success=False,
+                message="Failed to save sensor reading. Please try again.",
+                errors=["Database operation failed"]
+            )
 
 class HumidityReadingObject(SQLAlchemyObjectType):
     class Meta:
@@ -215,7 +285,7 @@ class HumidityReadingObject(SQLAlchemyObjectType):
 
     sensor_reading = graphene.Field(lambda: SensorReadingObject)
 
-    def resolve_sensor_reading(self, info):
+    def resolve_sensor_reading(self, info: Any) -> SensorReadingModel:
         return self.sensor_reading
 
 class TemperatureReadingObject(SQLAlchemyObjectType):
@@ -224,7 +294,7 @@ class TemperatureReadingObject(SQLAlchemyObjectType):
 
     sensor_reading = graphene.Field(lambda: SensorReadingObject)
 
-    def resolve_sensor_reading(self, info):
+    def resolve_sensor_reading(self, info: Any) -> SensorReadingModel:
         return self.sensor_reading
 
 class CO2ReadingObject(SQLAlchemyObjectType):
@@ -233,7 +303,7 @@ class CO2ReadingObject(SQLAlchemyObjectType):
 
     sensor_reading = graphene.Field(lambda: SensorReadingObject)
 
-    def resolve_sensor_reading(self, info):
+    def resolve_sensor_reading(self, info: Any) -> SensorReadingModel:
         return self.sensor_reading
 
 class ErrorLogObject(SQLAlchemyObjectType):
@@ -242,11 +312,576 @@ class ErrorLogObject(SQLAlchemyObjectType):
 
     sensor_reading = graphene.Field(lambda: SensorReadingObject)
 
-    def resolve_sensor_reading(self, info):
+    def resolve_sensor_reading(self, info: Any) -> SensorReadingModel:
         return self.sensor_reading
+
+
+class UserObject(SQLAlchemyObjectType):
+    """GraphQL object for User model."""
+    class Meta:
+        model = User
+        exclude_fields = (
+            'password_hash', 
+            'email_verification_token', 
+            'password_reset_token',
+            'failed_login_attempts',
+            'account_locked_until'
+        )  # Never expose sensitive security fields
+    
+    full_name = graphene.String()
+    
+    def resolve_full_name(self, info: Any) -> Optional[str]:
+        """Get user's full name."""
+        if self.first_name and self.last_name:
+            return f"{self.first_name} {self.last_name}"
+        return self.first_name or self.last_name
+
+
+class AuthPayload(graphene.ObjectType):
+    """Authentication response payload."""
+    user = graphene.Field(UserObject)
+    token = graphene.String()
+    success = graphene.Boolean()
+    message = graphene.String()
+
+
+class RegisterInput(graphene.InputObjectType):
+    """Input for user registration."""
+    username = graphene.String(required=True)
+    email = graphene.String(required=True)
+    password = graphene.String(required=True)
+    first_name = graphene.String()
+    last_name = graphene.String()
+
+
+class LoginInput(graphene.InputObjectType):
+    """Input for user login."""
+    username_or_email = graphene.String(required=True)
+    password = graphene.String(required=True)
+
+
+class RegisterUser(graphene.Mutation):
+    """User registration mutation."""
+    class Arguments:
+        input = RegisterInput(required=True)
+
+    Output = AuthPayload
+
+    @staticmethod
+    def mutate(root: Any, info: Any, input: RegisterInput) -> AuthPayload:
+        """Register a new user account with comprehensive validation.
+        
+        Validates input data and creates a new user with hashed password
+        and authentication token.
+        """
+        from app.validation import UserInputValidator
+        
+        try:
+            # Validate input data
+            validator = UserInputValidator()
+            validation_result = validator.validate_registration_input(
+                username=input.username,
+                email=input.email,
+                password=input.password,
+                first_name=input.first_name,
+                last_name=input.last_name
+            )
+            
+            # Return validation errors if any
+            if not validation_result.is_valid:
+                logger.warning(
+                    "User registration validation failed",
+                    extra={
+                        'extra_context': {
+                            'username': input.username,
+                            'email': input.email,
+                            'validation_errors': validation_result.error_messages,
+                            'operation': 'register_user_validation'
+                        }
+                    }
+                )
+                # Return first validation error message for user-friendly response
+                return AuthPayload(
+                    success=False,
+                    message=validation_result.errors[0].message
+                )
+            
+            # Check if username already exists
+            if User.query.filter_by(username=input.username).first():
+                return AuthPayload(
+                    success=False,
+                    message="Username already exists"
+                )
+            
+            # Check if email already exists
+            if User.query.filter_by(email=input.email).first():
+                return AuthPayload(
+                    success=False,
+                    message="Email already registered"
+                )
+            
+            # Create new user with validated data (email verification required)
+            user = User(
+                username=input.username.strip(),
+                email=input.email.strip().lower(),
+                first_name=input.first_name.strip() if input.first_name else None,
+                last_name=input.last_name.strip() if input.last_name else None,
+                role='user',  # Default role for new registrations
+                email_verified=False  # Require email verification
+            )
+            user.set_password(input.password)
+            
+            # Generate email verification token
+            verification_token = user.generate_email_verification_token()
+            
+            db.session.add(user)
+            db.session.commit()
+            
+            # Send verification email
+            from app.email_service import email_service
+            email_sent = email_service.send_email_verification(
+                user.email, user.username, verification_token
+            )
+            
+            # Generate JWT token for initial login (but require email verification for full access)
+            token = user.generate_jwt_token()
+            user.update_last_login()
+            
+            logger.info(
+                "New user registered successfully",
+                extra={
+                    'extra_context': {
+                        'username': user.username,
+                        'email': user.email,
+                        'email_sent': email_sent,
+                        'operation': 'register_user_success'
+                    }
+                }
+            )
+            
+            message = "Registration successful! Please check your email to verify your account."
+            if not email_sent:
+                message = "Registration successful! Note: Verification email could not be sent. Please contact support."
+            
+            return AuthPayload(
+                user=user,
+                token=token,
+                success=True,
+                message=message
+            )
+            
+        except Exception as e:
+            db.session.rollback()
+            error_message = "Registration failed. Please try again."
+            
+            # Provide more specific error messages for common issues
+            error_str = str(e).lower()
+            if 'duplicate key' in error_str or 'unique constraint' in error_str:
+                if 'username' in error_str:
+                    error_message = "Username already exists. Please choose a different username."
+                elif 'email' in error_str:
+                    error_message = "Email already registered. Please use a different email or try logging in."
+                else:
+                    error_message = "An account with this information already exists."
+            elif 'connection' in error_str or 'database' in error_str:
+                error_message = "Database connection error. Please try again later."
+            elif 'column' in error_str and 'does not exist' in error_str:
+                error_message = "Database schema error. Please contact support."
+            
+            logger.error(
+                "User registration failed",
+                exc_info=True,
+                extra={
+                    'extra_context': {
+                        'username': input.username,
+                        'email': input.email,
+                        'error_type': type(e).__name__,
+                        'error_message': str(e),
+                        'operation': 'register_user_database_error'
+                    }
+                }
+            )
+            return AuthPayload(
+                success=False,
+                message=error_message
+            )
+
+
+class LoginUser(graphene.Mutation):
+    """User login mutation."""
+    class Arguments:
+        input = LoginInput(required=True)
+
+    Output = AuthPayload
+
+    @staticmethod
+    def mutate(root: Any, info: Any, input: LoginInput) -> AuthPayload:
+        """Authenticate user and return JWT token.
+        
+        Accepts either username or email for login.
+        """
+        try:
+            # Find user by username or email
+            user = User.query.filter(
+                or_(
+                    User.username == input.username_or_email,
+                    User.email == input.username_or_email
+                )
+            ).first()
+            
+            if not user:
+                # Log failed login attempt for security monitoring
+                logger.warning(
+                    f"Login attempt with non-existent user: {input.username_or_email}",
+                    extra={'extra_context': {'operation': 'login_nonexistent_user'}}
+                )
+                return AuthPayload(
+                    success=False,
+                    message="Invalid credentials"
+                )
+            
+            # Check if account is locked
+            if user.is_account_locked():
+                logger.warning(
+                    f"Login attempt on locked account: {user.username}",
+                    extra={'extra_context': {'user_id': user.id, 'operation': 'login_locked_account'}}
+                )
+                return AuthPayload(
+                    success=False,
+                    message="Account is temporarily locked due to multiple failed login attempts. Please try again later or reset your password."
+                )
+            
+            if not user.is_active:
+                return AuthPayload(
+                    success=False,
+                    message="Account is deactivated. Please contact support."
+                )
+            
+            # Check password
+            if not user.check_password(input.password):
+                # Record failed login attempt
+                user.record_failed_login()
+                db.session.commit()
+                
+                logger.warning(
+                    f"Failed login attempt for user: {user.username}",
+                    extra={
+                        'extra_context': {
+                            'user_id': user.id,
+                            'failed_attempts': user.failed_login_attempts,
+                            'operation': 'login_failed_password'
+                        }
+                    }
+                )
+                
+                return AuthPayload(
+                    success=False,
+                    message="Invalid credentials"
+                )
+            
+            # Successful login - reset security counters and generate token
+            user.record_successful_login()
+            token = user.generate_jwt_token()
+            db.session.commit()
+            
+            logger.info(
+                f"User logged in successfully: {user.username}",
+                extra={
+                    'extra_context': {
+                        'user_id': user.id,
+                        'email_verified': user.email_verified,
+                        'operation': 'login_success'
+                    }
+                }
+            )
+            
+            # Include email verification status in response
+            message = "Login successful"
+            if not user.email_verified:
+                message = "Login successful. Please verify your email address for full account access."
+            
+            return AuthPayload(
+                user=user,
+                token=token,
+                success=True,
+                message=message
+            )
+            
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Login failed: {str(e)}")
+            return AuthPayload(
+                success=False,
+                message="Login failed. Please try again."
+            )
+
+
+class EmailVerificationInput(graphene.InputObjectType):
+    """Input for email verification."""
+    token = graphene.String(required=True)
+
+
+class PasswordResetRequestInput(graphene.InputObjectType):
+    """Input for password reset request."""
+    email = graphene.String(required=True)
+
+
+class PasswordResetInput(graphene.InputObjectType):
+    """Input for password reset."""
+    token = graphene.String(required=True)
+    new_password = graphene.String(required=True)
+
+
+class LogoutInput(graphene.InputObjectType):
+    """Input for logout."""
+    token = graphene.String(required=True)
+
+
+class VerifyEmail(graphene.Mutation):
+    """Email verification mutation."""
+    class Arguments:
+        input = EmailVerificationInput(required=True)
+
+    success = graphene.Boolean()
+    message = graphene.String()
+
+    @staticmethod
+    def mutate(root: Any, info: Any, input: EmailVerificationInput) -> 'VerifyEmail':
+        """Verify user email with token."""
+        try:
+            # Find user with verification token
+            user = User.query.filter_by(email_verification_token=input.token).first()
+            
+            if not user:
+                return VerifyEmail(
+                    success=False,
+                    message="Invalid or expired verification token"
+                )
+            
+            # Verify email with token
+            if user.verify_email_with_token(input.token):
+                db.session.commit()
+                
+                logger.info(
+                    f"Email verified successfully for user: {user.username}",
+                    extra={
+                        'extra_context': {
+                            'user_id': user.id,
+                            'email': user.email,
+                            'operation': 'email_verification_success'
+                        }
+                    }
+                )
+                
+                return VerifyEmail(
+                    success=True,
+                    message="Email verified successfully"
+                )
+            else:
+                return VerifyEmail(
+                    success=False,
+                    message="Invalid or expired verification token"
+                )
+                
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Email verification failed: {str(e)}")
+            return VerifyEmail(
+                success=False,
+                message="Email verification failed. Please try again."
+            )
+
+
+class RequestPasswordReset(graphene.Mutation):
+    """Password reset request mutation."""
+    class Arguments:
+        input = PasswordResetRequestInput(required=True)
+
+    success = graphene.Boolean()
+    message = graphene.String()
+
+    @staticmethod
+    def mutate(root: Any, info: Any, input: PasswordResetRequestInput) -> 'RequestPasswordReset':
+        """Send password reset email."""
+        try:
+            # Find user by email
+            user = User.query.filter_by(email=input.email.strip().lower()).first()
+            
+            # Always return success to prevent email enumeration
+            # But only send email if user exists
+            if user and user.is_active:
+                # Generate password reset token
+                reset_token = user.generate_password_reset_token()
+                db.session.commit()
+                
+                # Send password reset email
+                from app.email_service import email_service
+                email_sent = email_service.send_password_reset(
+                    user.email, user.username, reset_token
+                )
+                
+                logger.info(
+                    f"Password reset requested for user: {user.username}",
+                    extra={
+                        'extra_context': {
+                            'user_id': user.id,
+                            'email': user.email,
+                            'email_sent': email_sent,
+                            'operation': 'password_reset_request'
+                        }
+                    }
+                )
+            else:
+                # Log potential security issue
+                logger.warning(
+                    f"Password reset requested for non-existent/inactive email: {input.email}",
+                    extra={'extra_context': {'operation': 'password_reset_invalid_email'}}
+                )
+            
+            # Always return success message to prevent email enumeration
+            return RequestPasswordReset(
+                success=True,
+                message="If an account with that email exists, a password reset link has been sent."
+            )
+            
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Password reset request failed: {str(e)}")
+            return RequestPasswordReset(
+                success=False,
+                message="Password reset request failed. Please try again."
+            )
+
+
+class ResetPassword(graphene.Mutation):
+    """Password reset mutation."""
+    class Arguments:
+        input = PasswordResetInput(required=True)
+
+    success = graphene.Boolean()
+    message = graphene.String()
+
+    @staticmethod
+    def mutate(root: Any, info: Any, input: PasswordResetInput) -> 'ResetPassword':
+        """Reset password with token."""
+        from app.validation import UserInputValidator
+        
+        try:
+            # Validate new password
+            validator = UserInputValidator()
+            validation_result = validator.validate_registration_input(
+                username="dummy",  # Not used for password validation
+                email="dummy@example.com",  # Not used for password validation
+                password=input.new_password
+            )
+            if not validation_result.is_valid:
+                return ResetPassword(
+                    success=False,
+                    message="Password must be at least 8 characters long"
+                )
+            
+            # Find user with reset token
+            user = User.query.filter_by(password_reset_token=input.token).first()
+            
+            if not user:
+                return ResetPassword(
+                    success=False,
+                    message="Invalid or expired reset token"
+                )
+            
+            # Reset password with token
+            if user.reset_password_with_token(input.token, input.new_password):
+                db.session.commit()
+                
+                logger.info(
+                    f"Password reset successfully for user: {user.username}",
+                    extra={
+                        'extra_context': {
+                            'user_id': user.id,
+                            'operation': 'password_reset_success'
+                        }
+                    }
+                )
+                
+                return ResetPassword(
+                    success=True,
+                    message="Password reset successfully"
+                )
+            else:
+                return ResetPassword(
+                    success=False,
+                    message="Invalid or expired reset token"
+                )
+                
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Password reset failed: {str(e)}")
+            return ResetPassword(
+                success=False,
+                message="Password reset failed. Please try again."
+            )
+
+
+class LogoutUser(graphene.Mutation):
+    """User logout mutation."""
+    class Arguments:
+        input = LogoutInput(required=True)
+
+    success = graphene.Boolean()
+    message = graphene.String()
+
+    @staticmethod
+    def mutate(root: Any, info: Any, input: LogoutInput) -> 'LogoutUser':
+        """Logout user by blacklisting token."""
+        try:
+            # Get current user from token
+            user = User.verify_jwt_token(input.token)
+            
+            if not user:
+                return LogoutUser(
+                    success=False,
+                    message="Invalid token"
+                )
+            
+            # Blacklist the token
+            if user.blacklist_token(input.token):
+                logger.info(
+                    f"User logged out: {user.username}",
+                    extra={
+                        'extra_context': {
+                            'user_id': user.id,
+                            'operation': 'logout_success'
+                        }
+                    }
+                )
+                
+                return LogoutUser(
+                    success=True,
+                    message="Logout successful"
+                )
+            else:
+                return LogoutUser(
+                    success=False,
+                    message="Logout failed"
+                )
+                
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Logout failed: {str(e)}")
+            return LogoutUser(
+                success=False,
+                message="Logout failed. Please try again."
+            )
+
     
 class Mutation(graphene.ObjectType):
     create_sensor_reading = CreateSensorReading.Field()
+    register_user = RegisterUser.Field()
+    login_user = LoginUser.Field()
+    verify_email = VerifyEmail.Field()
+    request_password_reset = RequestPasswordReset.Field()
+    reset_password = ResetPassword.Field()
+    logout_user = LogoutUser.Field()
 
 class Query(graphene.ObjectType):
     sensors = graphene.List(SensorObject)
@@ -257,11 +892,16 @@ class Query(graphene.ObjectType):
     temperature_readings = graphene.List(TemperatureReadingObject)
     co2_readings = graphene.List(CO2ReadingObject)
     error_logs = graphene.List(ErrorLogObject)
+    
+    # User queries
+    users = graphene.List(UserObject)
+    me = graphene.Field(UserObject)
 
     sensor = graphene.Field(SensorObject, id=graphene.Int(required=True))
     location = graphene.Field(LocationObject, id=graphene.Int(required=True))
+    user = graphene.Field(UserObject, id=graphene.Int(required=True))
 
-    def resolve_sensors(self, info):
+    def resolve_sensors(self, info: Any) -> List[Sensor]:
         """Get all sensors with optimized loading.
         
         Loads basic sensor info and current locations. Individual resolvers
@@ -273,19 +913,19 @@ class Query(graphene.ObjectType):
             selectinload(Sensor.sensor_locations).selectinload(SensorLocation.location)
         ).all()
 
-    def resolve_locations(self, info):
+    def resolve_locations(self, info: Any) -> List[Location]:
         """Get all locations with their associated sensors."""
         return Location.query.options(
             selectinload(Location.sensor_locations).selectinload(SensorLocation.sensor)
         ).all()
 
-    def resolve_sensor_locations(self, info):
+    def resolve_sensor_locations(self, info: Any) -> List[SensorLocation]:
         return SensorLocation.query.options(
             joinedload(SensorLocation.sensor),
             joinedload(SensorLocation.location)
         ).all()
 
-    def resolve_sensor_readings(self, info):
+    def resolve_sensor_readings(self, info: Any) -> List[SensorReadingModel]:
         """Get recent sensor readings with all measurement data.
         
         Limited to 1000 most recent readings with eager loading for performance.
@@ -297,19 +937,19 @@ class Query(graphene.ObjectType):
             joinedload(SensorReadingModel.co2_reading)
         ).order_by(desc(SensorReadingModel.reading_time)).limit(1000).all()
 
-    def resolve_humidity_readings(self, info):
+    def resolve_humidity_readings(self, info: Any) -> List[HumidityReading]:
         return HumidityReading.query.limit(1000).all()
 
-    def resolve_temperature_readings(self, info):
+    def resolve_temperature_readings(self, info: Any) -> List[TemperatureReading]:
         return TemperatureReading.query.limit(1000).all()
 
-    def resolve_co2_readings(self, info):
+    def resolve_co2_readings(self, info: Any) -> List[CO2Reading]:
         return CO2Reading.query.limit(1000).all()
 
-    def resolve_error_logs(self, info):
+    def resolve_error_logs(self, info: Any) -> List[ErrorLog]:
         return ErrorLog.query.order_by(desc(ErrorLog.created_at)).limit(1000).all()
 
-    def resolve_sensor(self, info, id):
+    def resolve_sensor(self, info: Any, id: int) -> Optional[Sensor]:
         return Sensor.query.options(
             selectinload(Sensor.readings).selectinload(SensorReadingModel.humidity_reading),
             selectinload(Sensor.readings).selectinload(SensorReadingModel.temperature_reading),
@@ -317,14 +957,28 @@ class Query(graphene.ObjectType):
             selectinload(Sensor.sensor_locations).selectinload(SensorLocation.location)
         ).get(id)
 
-    def resolve_location(self, info, id):
+    def resolve_location(self, info: Any, id: int) -> Optional[Location]:
         return Location.query.options(
             selectinload(Location.sensor_locations).selectinload(SensorLocation.sensor)
         ).get(id)
     
+    @require_admin
+    def resolve_users(self, info: Any) -> List[User]:
+        """Get all users (admin only)."""
+        return User.query.all()
+    
+    def resolve_me(self, info: Any) -> Optional[User]:
+        """Get current authenticated user."""
+        return get_user_from_context(info)
+    
+    @require_admin
+    def resolve_user(self, info: Any, id: int) -> Optional[User]:
+        """Get user by ID (admin only)."""
+        return User.query.get(id)
+    
     filtered_sensor_readings = graphene.List(SensorReadingObject, filters=SensorDataFilterInput(required=True))
 
-    def resolve_filtered_sensor_readings(self, info, filters):
+    def resolve_filtered_sensor_readings(self, info: Any, filters: SensorDataFilterInput) -> List[SensorReadingModel]:
         """Get sensor readings filtered by various criteria.
         
         Supports filtering by date range, measurement values, sensors, locations,
@@ -430,7 +1084,15 @@ from app.graphql_security import SecureGraphQLSchema
 schema = SecureGraphQLSchema(
     query=Query, 
     mutation=Mutation, 
-    types=[CreateSensorReadingInput],
+    types=[
+        CreateSensorReadingInput, 
+        RegisterInput, 
+        LoginInput,
+        EmailVerificationInput,
+        PasswordResetRequestInput,
+        PasswordResetInput,
+        LogoutInput
+    ],
     max_depth=8,  # Appropriate for our schema depth
     max_complexity=150,  # Allows filtered queries but prevents abuse
     timeout_seconds=30,  # Reasonable timeout for database operations

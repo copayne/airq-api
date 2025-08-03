@@ -1,20 +1,28 @@
 #!/usr/bin/env python3
 """
-Test script for GraphQL security features
+Manual test script for GraphQL security features
 Tests depth limiting, complexity analysis, and timeout protection
+
+This is a manual testing script that requires a running server.
+Run: python test_security.py (when server is running on port 5000)
 """
 
 import requests
 import json
 import time
+import logging
+
+# Configure logging for this script
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # GraphQL endpoint
-GRAPHQL_URL = "http://127.0.0.1:5000/graphql"
+GRAPHQL_URL = "http://mini:5000/graphql"
 
-def test_query(name: str, query: str, should_fail: bool = False):
+def run_security_test(name: str, query: str, should_fail: bool = False):
     """Test a GraphQL query and report results"""
-    print(f"\n🔍 Testing: {name}")
-    print(f"Query: {query[:100]}{'...' if len(query) > 100 else ''}")
+    logger.info(f"🔍 Testing: {name}")
+    logger.debug(f"Query: {query[:100]}{'...' if len(query) > 100 else ''}")
     
     try:
         response = requests.post(
@@ -26,25 +34,25 @@ def test_query(name: str, query: str, should_fail: bool = False):
         result = response.json()
         
         if "errors" in result:
-            print(f"❌ Query failed: {result['errors'][0]['message']}")
+            logger.warning(f"❌ Query failed: {result['errors'][0]['message']}")
             if should_fail:
-                print("✅ Expected failure - security protection working!")
+                logger.info("✅ Expected failure - security protection working!")
             else:
-                print("⚠️  Unexpected failure")
+                logger.error("⚠️  Unexpected failure")
         else:
-            print(f"✅ Query succeeded - returned {len(str(result))} characters")
+            logger.info(f"✅ Query succeeded - returned {len(str(result))} characters")
             if should_fail:
-                print("⚠️  Expected this to fail - security may not be working")
+                logger.warning("⚠️  Expected this to fail - security may not be working")
         
         return result
         
     except requests.exceptions.RequestException as e:
-        print(f"❌ Request failed: {str(e)}")
+        logger.error(f"❌ Request failed: {str(e)}")
         return None
 
 def main():
-    print("🛡️  GraphQL Security Feature Testing")
-    print("=" * 50)
+    logger.info("🛡️  GraphQL Security Feature Testing")
+    logger.info("=" * 50)
     
     # Test 1: Simple valid query (should work)
     simple_query = """
@@ -55,7 +63,7 @@ def main():
         }
     }
     """
-    test_query("Simple Query", simple_query, should_fail=False)
+    run_security_test("Simple Query", simple_query, should_fail=False)
     
     # Test 2: Deep nested query (should fail due to depth limiting)
     deep_query = """
@@ -81,7 +89,7 @@ def main():
         }
     }
     """
-    test_query("Deep Nested Query (should fail)", deep_query, should_fail=True)
+    run_security_test("Deep Nested Query (should fail)", deep_query, should_fail=True)
     
     # Test 3: Complex query with many fields (should fail due to complexity)
     complex_query = """
@@ -154,7 +162,7 @@ def main():
         }
     }
     """
-    test_query("High Complexity Query (should fail)", complex_query, should_fail=True)
+    run_security_test("High Complexity Query (should fail)", complex_query, should_fail=True)
     
     # Test 4: Filtered query with reasonable complexity (should work)
     filtered_query = """
@@ -176,11 +184,11 @@ def main():
         }
     }
     """
-    test_query("Filtered Query", filtered_query, should_fail=False)
+    run_security_test("Filtered Query", filtered_query, should_fail=False)
     
     # Test 5: Rate limiting test (multiple rapid requests)
-    print(f"\n🔍 Testing: Rate Limiting (50 rapid requests)")
-    print("Sending 50 requests rapidly...")
+    logger.info("\n🔍 Testing: Rate Limiting (50 rapid requests)")
+    logger.info("Sending 50 requests rapidly...")
     
     rate_limit_hit = False
     for i in range(50):
@@ -191,18 +199,18 @@ def main():
         )
         
         if response.status_code == 429:
-            print(f"✅ Rate limit hit after {i+1} requests - protection working!")
+            logger.info(f"✅ Rate limit hit after {i+1} requests - protection working!")
             rate_limit_hit = True
             break
         elif response.status_code != 200:
-            print(f"❌ Unexpected status code: {response.status_code}")
+            logger.error(f"❌ Unexpected status code: {response.status_code}")
             break
     
     if not rate_limit_hit:
-        print("⚠️  Rate limit not hit - may need adjustment for testing")
+        logger.warning("⚠️  Rate limit not hit - may need adjustment for testing")
     
-    print("\n" + "=" * 50)
-    print("🛡️  Security testing complete!")
+    logger.info("\n" + "=" * 50)
+    logger.info("🛡️  Security testing complete!")
 
 if __name__ == "__main__":
     main()

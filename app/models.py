@@ -1,6 +1,288 @@
 from app import db
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy.orm import relationship
+from passlib.hash import bcrypt
+from typing import Optional
+import jwt
+import os
+import secrets
+import string
+
+
+class User(db.Model):
+    """User model for authentication and authorization."""
+    __tablename__ = 'users'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String(255), unique=True, nullable=False, index=True)
+    username = db.Column(db.String(80), unique=True, nullable=False, index=True)
+    password_hash = db.Column(db.String(255), nullable=False)
+    first_name = db.Column(db.String(100))
+    last_name = db.Column(db.String(100))
+    
+    # Role-based access control
+    role = db.Column(db.String(20), nullable=False, default='viewer', index=True)  # admin, user, viewer
+    is_active = db.Column(db.Boolean, default=True, nullable=False)
+    
+    # Account security fields
+    email_verified = db.Column(db.Boolean, default=False, nullable=False)
+    email_verification_token = db.Column(db.String(255), nullable=True, index=True)
+    email_verification_expires = db.Column(db.DateTime, nullable=True)
+    
+    # Password reset fields
+    password_reset_token = db.Column(db.String(255), nullable=True, index=True)
+    password_reset_expires = db.Column(db.DateTime, nullable=True)
+    
+    # Account security
+    failed_login_attempts = db.Column(db.Integer, default=0, nullable=False)
+    account_locked_until = db.Column(db.DateTime, nullable=True)
+    
+    # Timestamps
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, index=True)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    last_login = db.Column(db.DateTime, index=True)
+    
+    def set_password(self, password: str) -> None:
+        """Hash and set user password."""
+        self.password_hash = bcrypt.hash(password)
+    
+    def check_password(self, password: str) -> bool:
+        """Check if provided password matches hash."""
+        return bcrypt.verify(password, self.password_hash)
+    
+    def generate_jwt_token(self, expires_in: int = 3600) -> str:
+        """Generate JWT token for user authentication.
+        
+        Args:
+            expires_in: Token expiration time in seconds (default 1 hour)
+            
+        Returns:
+            JWT token string
+        """
+        jti = self._generate_secure_token()  # Unique token ID for blacklisting
+        exp_time = datetime.utcnow() + timedelta(seconds=expires_in)
+        
+        payload = {
+            'user_id': self.id,
+            'username': self.username,
+            'role': self.role,
+            'jti': jti,
+            'exp': exp_time,
+            'iat': datetime.utcnow()
+        }
+        
+        secret_key = os.environ.get('SECRET_KEY')
+        if not secret_key:
+            raise ValueError("SECRET_KEY environment variable is required for JWT generation")
+            
+        return jwt.encode(payload, secret_key, algorithm='HS256')
+    
+    @staticmethod
+    def verify_jwt_token(token: str) -> Optional['User']:
+        """Verify JWT token and return user if valid.
+        
+        Args:
+            token: JWT token string
+            
+        Returns:
+            User instance if token is valid, None otherwise
+        """
+        try:
+            secret_key = os.environ.get('SECRET_KEY')
+            if not secret_key:
+                return None
+                
+            payload = jwt.decode(token, secret_key, algorithms=['HS256'])
+            user_id = payload.get('user_id')
+            jti = payload.get('jti')
+            
+            # Check if token is blacklisted
+            if jti and TokenBlacklist.is_token_blacklisted(jti):
+                return None
+            
+            if user_id:
+                user = User.query.get(user_id)
+                # Additional security: check if user is still active
+                if user and user.is_active and not user.is_account_locked():
+                    return user
+                
+        except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
+            pass
+            
+        return None
+    
+    def has_permission(self, required_role: str) -> bool:
+        """Check if user has required permission level.
+        
+        Permission hierarchy: admin > user > viewer
+        
+        Args:
+            required_role: Required role level
+            
+        Returns:
+            True if user has permission, False otherwise
+        """
+        if not self.is_active:
+            return False
+            
+        role_hierarchy = {
+            'viewer': 1,
+            'user': 2,
+            'admin': 3
+        }
+        
+        user_level = role_hierarchy.get(self.role, 0)
+        required_level = role_hierarchy.get(required_role, 0)
+        
+        return user_level >= required_level
+    
+    def update_last_login(self) -> None:
+        """Update user's last login timestamp."""
+        self.last_login = datetime.utcnow()
+        db.session.commit()
+    
+    def generate_email_verification_token(self) -> str:
+        """Generate email verification token."""
+        token = self._generate_secure_token()
+        self.email_verification_token = token
+        self.email_verification_expires = datetime.utcnow() + timedelta(hours=24)
+        return token
+    
+    def verify_email_with_token(self, token: str) -> bool:
+        """Verify email with provided token."""
+        if (self.email_verification_token == token and 
+            self.email_verification_expires and
+            datetime.utcnow() < self.email_verification_expires):
+            self.email_verified = True
+            self.email_verification_token = None
+            self.email_verification_expires = None
+            return True
+        return False
+    
+    def generate_password_reset_token(self) -> str:
+        """Generate password reset token."""
+        token = self._generate_secure_token()
+        self.password_reset_token = token
+        self.password_reset_expires = datetime.utcnow() + timedelta(hours=1)
+        return token
+    
+    def reset_password_with_token(self, token: str, new_password: str) -> bool:
+        """Reset password with provided token."""
+        if (self.password_reset_token == token and 
+            self.password_reset_expires and
+            datetime.utcnow() < self.password_reset_expires):
+            self.set_password(new_password)
+            self.password_reset_token = None
+            self.password_reset_expires = None
+            self.failed_login_attempts = 0  # Reset failed attempts
+            self.account_locked_until = None  # Unlock account
+            return True
+        return False
+    
+    def is_account_locked(self) -> bool:
+        """Check if account is currently locked."""
+        if self.account_locked_until:
+            if datetime.utcnow() < self.account_locked_until:
+                return True
+            else:
+                # Lock has expired, reset
+                self.account_locked_until = None
+                self.failed_login_attempts = 0
+        return False
+    
+    def record_failed_login(self) -> None:
+        """Record a failed login attempt and lock account if necessary."""
+        self.failed_login_attempts += 1
+        
+        # Lock account after 5 failed attempts for 30 minutes
+        if self.failed_login_attempts >= 5:
+            self.account_locked_until = datetime.utcnow() + timedelta(minutes=30)
+    
+    def record_successful_login(self) -> None:
+        """Record successful login and reset security counters."""
+        self.failed_login_attempts = 0
+        self.account_locked_until = None
+        self.update_last_login()
+    
+    def blacklist_token(self, token: str) -> bool:
+        """Blacklist a JWT token (for logout)."""
+        try:
+            secret_key = os.environ.get('SECRET_KEY')
+            if not secret_key:
+                return False
+                
+            payload = jwt.decode(token, secret_key, algorithms=['HS256'])
+            jti = payload.get('jti')
+            exp = payload.get('exp')
+            
+            if jti and exp:
+                expires_at = datetime.fromtimestamp(exp)
+                TokenBlacklist.blacklist_token(jti, 'access', self.id, expires_at)
+                return True
+                
+        except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
+            pass
+            
+        return False
+    
+    def _generate_secure_token(self) -> str:
+        """Generate cryptographically secure random token."""
+        alphabet = string.ascii_letters + string.digits
+        return ''.join(secrets.choice(alphabet) for _ in range(32))
+    
+    def __repr__(self) -> str:
+        """Return string representation of User instance."""
+        return f'<User {self.username} ({self.role})>'
+
+
+class TokenBlacklist(db.Model):
+    """Model for tracking blacklisted JWT tokens."""
+    __tablename__ = 'token_blacklist'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    jti = db.Column(db.String(255), nullable=False, unique=True, index=True)  # JWT ID
+    token_type = db.Column(db.String(20), nullable=False)  # access, refresh
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    revoked_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, index=True)
+    expires_at = db.Column(db.DateTime, nullable=False, index=True)
+    
+    # Relationship
+    user = relationship("User", backref="blacklisted_tokens")
+    
+    @staticmethod
+    def is_token_blacklisted(jti: str) -> bool:
+        """Check if a token is blacklisted."""
+        token = TokenBlacklist.query.filter_by(jti=jti).first()
+        return token is not None
+    
+    @staticmethod
+    def blacklist_token(jti: str, token_type: str, user_id: int, expires_at: datetime) -> None:
+        """Add a token to the blacklist."""
+        blacklisted_token = TokenBlacklist(
+            jti=jti,
+            token_type=token_type,
+            user_id=user_id,
+            expires_at=expires_at
+        )
+        db.session.add(blacklisted_token)
+        db.session.commit()
+    
+    @staticmethod
+    def cleanup_expired_tokens() -> int:
+        """Remove expired tokens from blacklist and return count removed."""
+        current_time = datetime.utcnow()
+        expired_tokens = TokenBlacklist.query.filter(TokenBlacklist.expires_at < current_time).all()
+        count = len(expired_tokens)
+        
+        for token in expired_tokens:
+            db.session.delete(token)
+        
+        db.session.commit()
+        return count
+    
+    def __repr__(self) -> str:
+        return f'<TokenBlacklist {self.jti[:8]}... (User: {self.user_id})>'
+
 
 class Sensor(db.Model):
     __tablename__ = 'sensors'
@@ -115,7 +397,8 @@ class ApplicationErrorLog(db.Model):
     source_line = db.Column(db.Integer)
     created_at = db.Column(db.DateTime, nullable=False, index=True, default=datetime.utcnow)
     
-    def __repr__(self):
+    def __repr__(self) -> str:
+        """Return string representation of ApplicationErrorLog instance."""
         return f'<ApplicationErrorLog {self.level}: {self.message[:50]}...>'
 
 # Composite indexes for critical query performance

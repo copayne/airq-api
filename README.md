@@ -1,7 +1,23 @@
 # Hudson Air Quality API
 
 ## About
-The Hudson Air Quality API is a simple flask server built to store and serve air quality sensor readings to the Hudson Air Quality App. It uses a graphql endpoint to process data for the end user, with a postgres database. The purpose is to have both historical and live data in order to maximize air quality throughout 937 Hudson.
+The Hudson Air Quality API is a Flask/GraphQL server built to store and serve air quality sensor readings to the Hudson Air Quality App. It features comprehensive authentication, data validation, and a robust GraphQL API for both historical and real-time air quality data.
+
+## 📚 Documentation
+
+- **[Quick Start Guide](docs/quick-start.md)** - Get started with the API in minutes
+- **[API Reference](docs/api-reference.md)** - Complete GraphQL schema and endpoint documentation
+- **[Data Model](docs/data-model.md)** - Database schema and relationships
+- **[Postman Collection](docs/AirQ-API.postman_collection.json)** - Ready-to-use API testing collection
+
+## ✨ Features
+
+- **GraphQL API** with comprehensive queries and mutations
+- **JWT Authentication** with role-based access control (Admin, User, Viewer)
+- **Data Validation** with range checking and error handling
+- **Time-Series Data** with historical sensor location tracking
+- **Security Features** including rate limiting and query complexity analysis
+- **Comprehensive Testing** with 41+ test cases and coverage reports
 
 
 ## Initialize API on a new machine

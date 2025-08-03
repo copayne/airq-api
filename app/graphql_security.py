@@ -117,10 +117,16 @@ class QueryTimeoutHandler:
     """
     
     def __init__(self, timeout_seconds: int = 30):
+        """Initialize timeout handler with specified timeout duration.
+        
+        Args:
+            timeout_seconds: Maximum execution time before timeout
+        """
         self.timeout_seconds = timeout_seconds
         self.original_handler = None
     
     def __enter__(self):
+        """Enter context manager and set up timeout alarm."""
         def timeout_handler(signum, frame):
             raise GraphQLError(f"Query execution timed out after {self.timeout_seconds} seconds")
         
@@ -129,6 +135,7 @@ class QueryTimeoutHandler:
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
+        """Exit context manager and clean up timeout alarm."""
         signal.alarm(0)  # Cancel the alarm
         if self.original_handler is not None:
             signal.signal(signal.SIGALRM, self.original_handler)

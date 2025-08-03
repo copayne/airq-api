@@ -37,7 +37,7 @@ def create_app(config_class: Optional[Type[Config]] = None) -> Flask:
         flask_env = app.config.get('FLASK_ENV', 'production')
         if flask_env == 'development':
             CORS(app, 
-                 origins=['http://mini.local:3000'], 
+                 origins=['http://mini:3000'], 
                  supports_credentials=False,
                  allow_headers=['Content-Type', 'Authorization'],
                  methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
@@ -63,6 +63,14 @@ def create_app(config_class: Optional[Type[Config]] = None) -> Flask:
 
     # Configure structured logging with database persistence
     setup_logging(app, db)
+    
+    # Initialize authentication system
+    from app.auth import init_auth
+    init_auth(app)
+    
+    # Initialize email service
+    from app.email_service import init_email_service
+    init_email_service(app)
     
     # Log application startup
     if not app.debug:
