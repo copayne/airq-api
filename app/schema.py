@@ -5,7 +5,7 @@ from app.models import CO2Reading, ErrorLog, HumidityReading, Location, Sensor, 
 from app import db
 from sqlalchemy import and_, or_, desc, asc
 from sqlalchemy.orm import joinedload, selectinload
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 from app.auth import require_admin, require_user, get_user_from_context
 
@@ -314,6 +314,18 @@ class ErrorLogObject(SQLAlchemyObjectType):
 
     def resolve_sensor_reading(self, info: Any) -> SensorReadingModel:
         return self.sensor_reading
+
+
+class MetricsObject(graphene.ObjectType):
+    """Metrics object for dashboard statistics."""
+    co2_1day_avg = graphene.Float()
+    co2_30day_avg = graphene.Float()
+    temp_1day_avg = graphene.Float()
+    temp_30day_avg = graphene.Float()
+    temp_highest_all_time = graphene.Float()
+    temp_lowest_all_time = graphene.Float()
+    co2_highest_all_time = graphene.Int()
+    co2_lowest_all_time = graphene.Int()
 
 
 class UserObject(SQLAlchemyObjectType):
@@ -897,6 +909,9 @@ class Query(graphene.ObjectType):
     users = graphene.List(UserObject)
     me = graphene.Field(UserObject)
 
+    # Metrics query
+    metrics = graphene.Field(MetricsObject)
+
     sensor = graphene.Field(SensorObject, id=graphene.Int(required=True))
     location = graphene.Field(LocationObject, id=graphene.Int(required=True))
     user = graphene.Field(UserObject, id=graphene.Int(required=True))
@@ -975,7 +990,105 @@ class Query(graphene.ObjectType):
     def resolve_user(self, info: Any, id: int) -> Optional[User]:
         """Get user by ID (admin only)."""
         return User.query.get(id)
-    
+
+    def resolve_metrics(self, info: Any) -> Optional[MetricsObject]:
+        """Get dashboard metrics including running averages and all-time extremes.
+
+        Computes:
+        - 1-day and 30-day running averages for CO2 and temperature
+        - All-time highest and lowest values for both metrics
+
+        Uses optimized aggregation queries to minimize database load.
+        """
+        from sqlalchemy import func
+
+        # Calculate time boundaries
+        now = datetime.utcnow()
+        one_day_ago = now - timedelta(days=1)
+        thirty_days_ago = now - timedelta(days=30)
+
+        try:
+            # CO2 metrics - 1-day average
+            co2_1day = db.session.query(
+                func.avg(CO2Reading.co2_ppm)
+            ).join(SensorReadingModel).filter(
+                SensorReadingModel.reading_time >= one_day_ago
+            ).scalar()
+
+            # CO2 metrics - 30-day average
+            co2_30day = db.session.query(
+                func.avg(CO2Reading.co2_ppm)
+            ).join(SensorReadingModel).filter(
+                SensorReadingModel.reading_time >= thirty_days_ago
+            ).scalar()
+
+            # CO2 all-time extremes
+            co2_max = db.session.query(
+                func.max(CO2Reading.co2_ppm)
+            ).scalar()
+
+            co2_min = db.session.query(
+                func.min(CO2Reading.co2_ppm)
+            ).scalar()
+
+            # Temperature metrics - 1-day average
+            temp_1day = db.session.query(
+                func.avg(TemperatureReading.temperature_celsius)
+            ).join(SensorReadingModel).filter(
+                SensorReadingModel.reading_time >= one_day_ago
+            ).scalar()
+
+            # Temperature metrics - 30-day average
+            temp_30day = db.session.query(
+                func.avg(TemperatureReading.temperature_celsius)
+            ).join(SensorReadingModel).filter(
+                SensorReadingModel.reading_time >= thirty_days_ago
+            ).scalar()
+
+            # Temperature all-time extremes
+            temp_max = db.session.query(
+                func.max(TemperatureReading.temperature_celsius)
+            ).scalar()
+
+            temp_min = db.session.query(
+                func.min(TemperatureReading.temperature_celsius)
+            ).scalar()
+
+            logger.info(
+                "Metrics calculated successfully",
+                extra={
+                    'extra_context': {
+                        'operation': 'resolve_metrics_success',
+                        'has_co2_data': co2_1day is not None,
+                        'has_temp_data': temp_1day is not None
+                    }
+                }
+            )
+
+            return MetricsObject(
+                co2_1day_avg=float(co2_1day) if co2_1day is not None else None,
+                co2_30day_avg=float(co2_30day) if co2_30day is not None else None,
+                temp_1day_avg=float(temp_1day) if temp_1day is not None else None,
+                temp_30day_avg=float(temp_30day) if temp_30day is not None else None,
+                temp_highest_all_time=float(temp_max) if temp_max is not None else None,
+                temp_lowest_all_time=float(temp_min) if temp_min is not None else None,
+                co2_highest_all_time=int(co2_max) if co2_max is not None else None,
+                co2_lowest_all_time=int(co2_min) if co2_min is not None else None
+            )
+
+        except Exception as e:
+            logger.error(
+                "Failed to calculate metrics",
+                exc_info=True,
+                extra={
+                    'extra_context': {
+                        'operation': 'resolve_metrics_error',
+                        'error_type': type(e).__name__
+                    }
+                }
+            )
+            return None
+
     filtered_sensor_readings = graphene.List(SensorReadingObject, filters=SensorDataFilterInput(required=True))
 
     def resolve_filtered_sensor_readings(self, info: Any, filters: SensorDataFilterInput) -> List[SensorReadingModel]:
