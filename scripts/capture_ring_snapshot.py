@@ -6,7 +6,10 @@ This script captures a snapshot from a Ring camera using the RingSnapshotDownloa
 and stores the metadata in the database.
 
 Usage:
-    python3 capture_ring_snapshot.py
+    python3 capture_ring_snapshot.py [--device-id DEVICE_ID]
+
+Arguments:
+    --device-id    Ring device ID (optional, defaults to RingDeviceId in Settings.json)
 
 Exit Codes:
     0 - Success
@@ -17,6 +20,7 @@ import os
 import sys
 import subprocess
 import json
+import argparse
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,10 +28,10 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from app import create_app, db
-from app.models import RingSnapshot
+from app.models import RingSnapshot, Camera
 
 
-def capture_ring_snapshot():
+def capture_ring_snapshot(device_id_arg=None):
     """Capture a Ring camera snapshot and save metadata to database."""
 
     ring_capture_binary = "/home/copayne/dev/airq/ring-capture/RingSnapshotDownload"
@@ -46,20 +50,24 @@ def capture_ring_snapshot():
         print(f"Error: Settings file not found at {settings_file}", file=sys.stderr)
         return 1
 
-    try:
-        with open(settings_file, 'r') as f:
-            settings = json.load(f)
-    except Exception as e:
-        print(f"Error reading settings file: {e}", file=sys.stderr)
-        return 1
+    # Use command-line argument if provided, otherwise read from Settings.json
+    if device_id_arg:
+        device_id = str(device_id_arg)
+    else:
+        try:
+            with open(settings_file, 'r') as f:
+                settings = json.load(f)
+        except Exception as e:
+            print(f"Error reading settings file: {e}", file=sys.stderr)
+            return 1
 
-    device_id = settings.get('RingDeviceId')
-    if not device_id:
-        print("Error: RingDeviceId not configured in Settings.json", file=sys.stderr)
-        return 1
+        device_id = settings.get('RingDeviceId')
+        if not device_id:
+            print("Error: RingDeviceId not configured in Settings.json", file=sys.stderr)
+            return 1
 
-    # Convert to string if it's an integer
-    device_id = str(device_id)
+        # Convert to string if it's an integer
+        device_id = str(device_id)
 
     capture_timestamp = datetime.now(timezone.utc)
 
@@ -115,14 +123,17 @@ def capture_ring_snapshot():
         print(f"Error getting file size: {e}", file=sys.stderr)
         file_size = None
 
-    device_name = f"Ring Camera {device_id}"
-
     app = create_app()
     with app.app_context():
         try:
+            # Look up camera by device_id
+            camera = Camera.query.filter_by(device_id=device_id).first()
+            if not camera:
+                print(f"Error: Camera with device_id {device_id} not found in database", file=sys.stderr)
+                return 1
+
             snapshot = RingSnapshot(
-                device_id=device_id,
-                device_name=device_name,
+                camera_id=camera.id,
                 image_path=latest_image,
                 capture_timestamp=capture_timestamp,
                 file_size=file_size
@@ -131,7 +142,7 @@ def capture_ring_snapshot():
             db.session.add(snapshot)
             db.session.commit()
 
-            print(f"Snapshot record created: ID={snapshot.id}, Path={latest_image}, Size={file_size} bytes")
+            print(f"Snapshot record created: ID={snapshot.id}, Camera={camera.name}, Path={latest_image}, Size={file_size} bytes")
             return 0
 
         except Exception as e:
@@ -141,4 +152,14 @@ def capture_ring_snapshot():
 
 
 if __name__ == '__main__':
-    sys.exit(capture_ring_snapshot())
+    parser = argparse.ArgumentParser(
+        description='Capture Ring camera snapshot and save to database'
+    )
+    parser.add_argument(
+        '--device-id',
+        type=str,
+        help='Ring device ID (overrides Settings.json)'
+    )
+    args = parser.parse_args()
+
+    sys.exit(capture_ring_snapshot(device_id_arg=args.device_id))

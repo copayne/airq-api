@@ -1,7 +1,7 @@
 import graphene
 from graphene_sqlalchemy import SQLAlchemyObjectType
 from typing import Optional, List, Any, Dict
-from app.models import CO2Reading, ErrorLog, HumidityReading, Location, Sensor, SensorLocation, SensorReading as SensorReadingModel, TemperatureReading, User, RingSnapshot
+from app.models import CO2Reading, ErrorLog, HumidityReading, Location, Sensor, SensorLocation, SensorReading as SensorReadingModel, TemperatureReading, User, RingSnapshot, Camera
 from app import db
 from sqlalchemy import and_, or_, desc, asc
 from sqlalchemy.orm import joinedload, selectinload
@@ -886,22 +886,38 @@ class LogoutUser(graphene.Mutation):
             )
 
 
+class CameraObject(SQLAlchemyObjectType):
+    """GraphQL object for Ring cameras."""
+    class Meta:
+        model = Camera
+
+    latest_snapshot = graphene.Field(lambda: RingSnapshotObject)
+
+    def resolve_latest_snapshot(self, info: Any) -> Optional[RingSnapshot]:
+        """Get the most recent snapshot for this camera."""
+        return self.snapshots.order_by(desc(RingSnapshot.capture_timestamp)).first()
+
+
 class RingSnapshotObject(SQLAlchemyObjectType):
     """GraphQL object for Ring camera snapshots."""
     class Meta:
         model = RingSnapshot
 
     image_url = graphene.String()
+    camera = graphene.Field(CameraObject)
 
     def resolve_image_url(self, info: Any) -> str:
         """Generate URL for accessing the snapshot image."""
         return f"/api/ring-snapshots/{self.id}"
 
+    def resolve_camera(self, info: Any) -> Optional[Camera]:
+        """Get the camera for this snapshot."""
+        return self.camera
+
 
 class CreateRingSnapshotInput(graphene.InputObjectType):
     """Input for manually creating a ring snapshot record."""
-    device_id = graphene.String(required=True)
-    device_name = graphene.String(required=True)
+    camera_id = graphene.Int(required=True)
     image_path = graphene.String(required=True)
     capture_timestamp = graphene.DateTime(required=True)
     file_size = graphene.Int()
@@ -921,8 +937,7 @@ class CreateRingSnapshot(graphene.Mutation):
         """Create a new Ring snapshot database record."""
         try:
             snapshot = RingSnapshot(
-                device_id=input.device_id,
-                device_name=input.device_name,
+                camera_id=input.camera_id,
                 image_path=input.image_path,
                 capture_timestamp=input.capture_timestamp,
                 file_size=input.file_size
@@ -935,7 +950,7 @@ class CreateRingSnapshot(graphene.Mutation):
                 "Ring snapshot created successfully",
                 extra={
                     'extra_context': {
-                        'device_id': input.device_id,
+                        'camera_id': input.camera_id,
                         'snapshot_id': snapshot.id,
                         'operation': 'create_ring_snapshot_success'
                     }
@@ -971,19 +986,31 @@ class CreateRingSnapshot(graphene.Mutation):
 class CaptureRingSnapshot(graphene.Mutation):
     """Capture a new Ring snapshot synchronously."""
     class Arguments:
-        device_id = graphene.String()
+        camera_id = graphene.Int()
 
     snapshot = graphene.Field(RingSnapshotObject)
     success = graphene.Boolean()
     message = graphene.String()
 
     @staticmethod
-    def mutate(root: Any, info: Any, device_id: Optional[str] = None) -> 'CaptureRingSnapshot':
+    def mutate(root: Any, info: Any, camera_id: Optional[int] = None) -> 'CaptureRingSnapshot':
         """Capture a Ring snapshot by running the capture script synchronously."""
         import subprocess
         import os
+        import sys
 
         try:
+            # Look up camera if camera_id provided, otherwise use default
+            camera = None
+            if camera_id:
+                camera = Camera.query.get(camera_id)
+                if not camera:
+                    return CaptureRingSnapshot(
+                        snapshot=None,
+                        success=False,
+                        message=f"Camera with ID {camera_id} not found"
+                    )
+
             script_path = os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                 'scripts',
@@ -1001,14 +1028,20 @@ class CaptureRingSnapshot(graphene.Mutation):
                 "Starting Ring snapshot capture",
                 extra={
                     'extra_context': {
-                        'device_id': device_id,
+                        'camera_id': camera_id,
+                        'device_id': camera.device_id if camera else None,
                         'operation': 'capture_ring_snapshot_start'
                     }
                 }
             )
 
+            # Build command with optional device_id argument
+            cmd = [sys.executable, script_path]
+            if camera:
+                cmd.extend(['--device-id', camera.device_id])
+
             result = subprocess.run(
-                ['python3', script_path],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=60
@@ -1114,15 +1147,19 @@ class Query(graphene.ObjectType):
     # Metrics query
     metrics = graphene.Field(MetricsObject)
 
+    # Camera queries
+    cameras = graphene.List(CameraObject)
+    camera = graphene.Field(CameraObject, id=graphene.Int(), device_id=graphene.String())
+
     # Ring snapshot queries
     ring_snapshots = graphene.List(
         RingSnapshotObject,
-        device_id=graphene.String(),
+        camera_id=graphene.Int(),
         limit=graphene.Int()
     )
     latest_ring_snapshot = graphene.Field(
         RingSnapshotObject,
-        device_id=graphene.String()
+        camera_id=graphene.Int()
     )
 
     sensor = graphene.Field(SensorObject, id=graphene.Int(required=True))
@@ -1204,17 +1241,34 @@ class Query(graphene.ObjectType):
         """Get user by ID (admin only)."""
         return User.query.get(id)
 
+    def resolve_cameras(self, info: Any) -> List[Camera]:
+        """Get all cameras."""
+        return Camera.query.all()
+
+    def resolve_camera(
+        self,
+        info: Any,
+        id: Optional[int] = None,
+        device_id: Optional[str] = None
+    ) -> Optional[Camera]:
+        """Get a camera by ID or device_id."""
+        if id:
+            return Camera.query.get(id)
+        elif device_id:
+            return Camera.query.filter_by(device_id=device_id).first()
+        return None
+
     def resolve_ring_snapshots(
         self,
         info: Any,
-        device_id: Optional[str] = None,
+        camera_id: Optional[int] = None,
         limit: Optional[int] = 100
     ) -> List[RingSnapshot]:
         """Get Ring camera snapshots with optional filtering."""
         query = RingSnapshot.query
 
-        if device_id:
-            query = query.filter_by(device_id=device_id)
+        if camera_id:
+            query = query.filter_by(camera_id=camera_id)
 
         query = query.order_by(desc(RingSnapshot.capture_timestamp))
 
@@ -1226,13 +1280,13 @@ class Query(graphene.ObjectType):
     def resolve_latest_ring_snapshot(
         self,
         info: Any,
-        device_id: Optional[str] = None
+        camera_id: Optional[int] = None
     ) -> Optional[RingSnapshot]:
         """Get the most recent Ring camera snapshot."""
         query = RingSnapshot.query
 
-        if device_id:
-            query = query.filter_by(device_id=device_id)
+        if camera_id:
+            query = query.filter_by(camera_id=camera_id)
 
         return query.order_by(desc(RingSnapshot.capture_timestamp)).first()
 
