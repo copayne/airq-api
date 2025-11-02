@@ -17,7 +17,7 @@ import os
 import sys
 import subprocess
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 project_root = Path(__file__).parent.parent
@@ -58,7 +58,10 @@ def capture_ring_snapshot():
         print("Error: RingDeviceId not configured in Settings.json", file=sys.stderr)
         return 1
 
-    capture_timestamp = datetime.utcnow()
+    # Convert to string if it's an integer
+    device_id = str(device_id)
+
+    capture_timestamp = datetime.now(timezone.utc)
 
     try:
         result = subprocess.run(
@@ -66,7 +69,7 @@ def capture_ring_snapshot():
                 ring_capture_binary,
                 '-out', output_directory,
                 '-deviceid', device_id,
-                '-force'
+                '-forceupdate'
             ],
             capture_output=True,
             text=True,
