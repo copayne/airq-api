@@ -401,6 +401,46 @@ class ApplicationErrorLog(db.Model):
         """Return string representation of ApplicationErrorLog instance."""
         return f'<ApplicationErrorLog {self.level}: {self.message[:50]}...>'
 
+class Camera(db.Model):
+    """Model for storing Ring camera device information."""
+    __tablename__ = 'cameras'
+
+    id = db.Column(db.Integer, primary_key=True)
+    device_id = db.Column(db.String(100), nullable=False, unique=True, index=True)
+    name = db.Column(db.String(255), nullable=False)
+    location = db.Column(db.String(255))
+    model = db.Column(db.String(100))
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationship to snapshots
+    snapshots = db.relationship('RingSnapshot', back_populates='camera', lazy='dynamic')
+
+    def __repr__(self) -> str:
+        """Return string representation of Camera instance."""
+        return f'<Camera {self.name} ({self.device_id})>'
+
+
+class RingSnapshot(db.Model):
+    """Model for storing Ring camera snapshot metadata."""
+    __tablename__ = 'ring_snapshots'
+
+    id = db.Column(db.Integer, primary_key=True)
+    camera_id = db.Column(db.Integer, db.ForeignKey('cameras.id'), nullable=False, index=True)
+    image_path = db.Column(db.String(500), nullable=False)
+    capture_timestamp = db.Column(db.DateTime, nullable=False, index=True)
+    file_size = db.Column(db.Integer)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+    # Relationship to camera
+    camera = db.relationship('Camera', back_populates='snapshots')
+
+    def __repr__(self) -> str:
+        """Return string representation of RingSnapshot instance."""
+        return f'<RingSnapshot camera_id={self.camera_id} at {self.capture_timestamp}>'
+
+
 # Composite indexes for critical query performance
 # These indexes optimize the most frequent query patterns identified in OPTIMIZE.md
 
@@ -415,3 +455,6 @@ db.Index('idx_sensor_locations_location_current', SensorLocation.location_id, Se
 
 # Index for error log queries (timestamp + level)
 db.Index('idx_application_error_logs_timestamp_level', ApplicationErrorLog.timestamp, ApplicationErrorLog.level)
+
+# Index for ring snapshot queries (camera_id + capture_timestamp)
+db.Index('idx_ring_snapshots_camera_time', RingSnapshot.camera_id, RingSnapshot.capture_timestamp)
