@@ -72,6 +72,52 @@ def create_app(config_class: Optional[Type[Config]] = None) -> Flask:
     from app.email_service import init_email_service
     init_email_service(app)
     
+    # Image serving route for Ring snapshots
+    from flask import send_file, abort
+    from app.models import RingSnapshot
+
+    @app.route('/api/ring-snapshots/<int:snapshot_id>')
+    def serve_ring_snapshot(snapshot_id: int):
+        """Serve Ring camera snapshot image by ID."""
+        snapshot = RingSnapshot.query.get(snapshot_id)
+
+        if not snapshot:
+            abort(404, description="Snapshot not found")
+
+        if not os.path.exists(snapshot.image_path):
+            app.logger.error(
+                f"Ring snapshot image file not found",
+                extra={
+                    'extra_context': {
+                        'snapshot_id': snapshot_id,
+                        'image_path': snapshot.image_path,
+                        'operation': 'serve_ring_snapshot_missing_file'
+                    }
+                }
+            )
+            abort(404, description="Snapshot image file not found")
+
+        try:
+            return send_file(
+                snapshot.image_path,
+                mimetype='image/jpeg',
+                as_attachment=False,
+                download_name=f"ring_snapshot_{snapshot_id}.jpg"
+            )
+        except Exception as e:
+            app.logger.error(
+                f"Failed to serve Ring snapshot",
+                exc_info=True,
+                extra={
+                    'extra_context': {
+                        'snapshot_id': snapshot_id,
+                        'error_type': type(e).__name__,
+                        'operation': 'serve_ring_snapshot_error'
+                    }
+                }
+            )
+            abort(500, description="Failed to serve snapshot image")
+
     # Log application startup
     if not app.debug:
         app.logger.info('AirQ API startup - GraphQL security enabled with query protection')

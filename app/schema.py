@@ -1,7 +1,7 @@
 import graphene
 from graphene_sqlalchemy import SQLAlchemyObjectType
 from typing import Optional, List, Any, Dict
-from app.models import CO2Reading, ErrorLog, HumidityReading, Location, Sensor, SensorLocation, SensorReading as SensorReadingModel, TemperatureReading, User
+from app.models import CO2Reading, ErrorLog, HumidityReading, Location, Sensor, SensorLocation, SensorReading as SensorReadingModel, TemperatureReading, User, RingSnapshot
 from app import db
 from sqlalchemy import and_, or_, desc, asc
 from sqlalchemy.orm import joinedload, selectinload
@@ -848,13 +848,13 @@ class LogoutUser(graphene.Mutation):
         try:
             # Get current user from token
             user = User.verify_jwt_token(input.token)
-            
+
             if not user:
                 return LogoutUser(
                     success=False,
                     message="Invalid token"
                 )
-            
+
             # Blacklist the token
             if user.blacklist_token(input.token):
                 logger.info(
@@ -866,7 +866,7 @@ class LogoutUser(graphene.Mutation):
                         }
                     }
                 )
-                
+
                 return LogoutUser(
                     success=True,
                     message="Logout successful"
@@ -876,7 +876,7 @@ class LogoutUser(graphene.Mutation):
                     success=False,
                     message="Logout failed"
                 )
-                
+
         except Exception as e:
             db.session.rollback()
             logger.error(f"Logout failed: {str(e)}")
@@ -885,7 +885,207 @@ class LogoutUser(graphene.Mutation):
                 message="Logout failed. Please try again."
             )
 
-    
+
+class RingSnapshotObject(SQLAlchemyObjectType):
+    """GraphQL object for Ring camera snapshots."""
+    class Meta:
+        model = RingSnapshot
+
+    image_url = graphene.String()
+
+    def resolve_image_url(self, info: Any) -> str:
+        """Generate URL for accessing the snapshot image."""
+        return f"/api/ring-snapshots/{self.id}"
+
+
+class CreateRingSnapshotInput(graphene.InputObjectType):
+    """Input for manually creating a ring snapshot record."""
+    device_id = graphene.String(required=True)
+    device_name = graphene.String(required=True)
+    image_path = graphene.String(required=True)
+    capture_timestamp = graphene.DateTime(required=True)
+    file_size = graphene.Int()
+
+
+class CreateRingSnapshot(graphene.Mutation):
+    """Create a new Ring snapshot record."""
+    class Arguments:
+        input = CreateRingSnapshotInput(required=True)
+
+    snapshot = graphene.Field(RingSnapshotObject)
+    success = graphene.Boolean()
+    message = graphene.String()
+
+    @staticmethod
+    def mutate(root: Any, info: Any, input: CreateRingSnapshotInput) -> 'CreateRingSnapshot':
+        """Create a new Ring snapshot database record."""
+        try:
+            snapshot = RingSnapshot(
+                device_id=input.device_id,
+                device_name=input.device_name,
+                image_path=input.image_path,
+                capture_timestamp=input.capture_timestamp,
+                file_size=input.file_size
+            )
+
+            db.session.add(snapshot)
+            db.session.commit()
+
+            logger.info(
+                "Ring snapshot created successfully",
+                extra={
+                    'extra_context': {
+                        'device_id': input.device_id,
+                        'snapshot_id': snapshot.id,
+                        'operation': 'create_ring_snapshot_success'
+                    }
+                }
+            )
+
+            return CreateRingSnapshot(
+                snapshot=snapshot,
+                success=True,
+                message="Snapshot created successfully"
+            )
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(
+                "Failed to create Ring snapshot",
+                exc_info=True,
+                extra={
+                    'extra_context': {
+                        'device_id': input.device_id,
+                        'operation': 'create_ring_snapshot_error'
+                    }
+                }
+            )
+
+            return CreateRingSnapshot(
+                snapshot=None,
+                success=False,
+                message="Failed to create snapshot record"
+            )
+
+
+class CaptureRingSnapshot(graphene.Mutation):
+    """Capture a new Ring snapshot synchronously."""
+    class Arguments:
+        device_id = graphene.String()
+
+    snapshot = graphene.Field(RingSnapshotObject)
+    success = graphene.Boolean()
+    message = graphene.String()
+
+    @staticmethod
+    def mutate(root: Any, info: Any, device_id: Optional[str] = None) -> 'CaptureRingSnapshot':
+        """Capture a Ring snapshot by running the capture script synchronously."""
+        import subprocess
+        import os
+
+        try:
+            script_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                'scripts',
+                'capture_ring_snapshot.py'
+            )
+
+            if not os.path.exists(script_path):
+                return CaptureRingSnapshot(
+                    snapshot=None,
+                    success=False,
+                    message="Capture script not found"
+                )
+
+            logger.info(
+                "Starting Ring snapshot capture",
+                extra={
+                    'extra_context': {
+                        'device_id': device_id,
+                        'operation': 'capture_ring_snapshot_start'
+                    }
+                }
+            )
+
+            result = subprocess.run(
+                ['python3', script_path],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+
+            if result.returncode != 0:
+                logger.error(
+                    "Capture script failed",
+                    extra={
+                        'extra_context': {
+                            'return_code': result.returncode,
+                            'stderr': result.stderr,
+                            'operation': 'capture_ring_snapshot_script_error'
+                        }
+                    }
+                )
+                return CaptureRingSnapshot(
+                    snapshot=None,
+                    success=False,
+                    message=f"Capture failed: {result.stderr}"
+                )
+
+            latest_snapshot = RingSnapshot.query.order_by(
+                desc(RingSnapshot.created_at)
+            ).first()
+
+            if latest_snapshot:
+                logger.info(
+                    "Ring snapshot captured successfully",
+                    extra={
+                        'extra_context': {
+                            'snapshot_id': latest_snapshot.id,
+                            'device_id': latest_snapshot.device_id,
+                            'operation': 'capture_ring_snapshot_success'
+                        }
+                    }
+                )
+                return CaptureRingSnapshot(
+                    snapshot=latest_snapshot,
+                    success=True,
+                    message="Snapshot captured successfully"
+                )
+            else:
+                return CaptureRingSnapshot(
+                    snapshot=None,
+                    success=False,
+                    message="Capture completed but snapshot not found in database"
+                )
+
+        except subprocess.TimeoutExpired:
+            logger.error(
+                "Capture script timeout",
+                extra={'extra_context': {'operation': 'capture_ring_snapshot_timeout'}}
+            )
+            return CaptureRingSnapshot(
+                snapshot=None,
+                success=False,
+                message="Capture timeout after 60 seconds"
+            )
+        except Exception as e:
+            logger.error(
+                "Failed to capture Ring snapshot",
+                exc_info=True,
+                extra={
+                    'extra_context': {
+                        'error_type': type(e).__name__,
+                        'operation': 'capture_ring_snapshot_error'
+                    }
+                }
+            )
+            return CaptureRingSnapshot(
+                snapshot=None,
+                success=False,
+                message=f"Capture failed: {str(e)}"
+            )
+
+
 class Mutation(graphene.ObjectType):
     create_sensor_reading = CreateSensorReading.Field()
     register_user = RegisterUser.Field()
@@ -894,6 +1094,8 @@ class Mutation(graphene.ObjectType):
     request_password_reset = RequestPasswordReset.Field()
     reset_password = ResetPassword.Field()
     logout_user = LogoutUser.Field()
+    create_ring_snapshot = CreateRingSnapshot.Field()
+    capture_ring_snapshot = CaptureRingSnapshot.Field()
 
 class Query(graphene.ObjectType):
     sensors = graphene.List(SensorObject)
@@ -904,13 +1106,24 @@ class Query(graphene.ObjectType):
     temperature_readings = graphene.List(TemperatureReadingObject)
     co2_readings = graphene.List(CO2ReadingObject)
     error_logs = graphene.List(ErrorLogObject)
-    
+
     # User queries
     users = graphene.List(UserObject)
     me = graphene.Field(UserObject)
 
     # Metrics query
     metrics = graphene.Field(MetricsObject)
+
+    # Ring snapshot queries
+    ring_snapshots = graphene.List(
+        RingSnapshotObject,
+        device_id=graphene.String(),
+        limit=graphene.Int()
+    )
+    latest_ring_snapshot = graphene.Field(
+        RingSnapshotObject,
+        device_id=graphene.String()
+    )
 
     sensor = graphene.Field(SensorObject, id=graphene.Int(required=True))
     location = graphene.Field(LocationObject, id=graphene.Int(required=True))
@@ -990,6 +1203,38 @@ class Query(graphene.ObjectType):
     def resolve_user(self, info: Any, id: int) -> Optional[User]:
         """Get user by ID (admin only)."""
         return User.query.get(id)
+
+    def resolve_ring_snapshots(
+        self,
+        info: Any,
+        device_id: Optional[str] = None,
+        limit: Optional[int] = 100
+    ) -> List[RingSnapshot]:
+        """Get Ring camera snapshots with optional filtering."""
+        query = RingSnapshot.query
+
+        if device_id:
+            query = query.filter_by(device_id=device_id)
+
+        query = query.order_by(desc(RingSnapshot.capture_timestamp))
+
+        if limit:
+            query = query.limit(limit)
+
+        return query.all()
+
+    def resolve_latest_ring_snapshot(
+        self,
+        info: Any,
+        device_id: Optional[str] = None
+    ) -> Optional[RingSnapshot]:
+        """Get the most recent Ring camera snapshot."""
+        query = RingSnapshot.query
+
+        if device_id:
+            query = query.filter_by(device_id=device_id)
+
+        return query.order_by(desc(RingSnapshot.capture_timestamp)).first()
 
     def resolve_metrics(self, info: Any) -> Optional[MetricsObject]:
         """Get dashboard metrics including running averages and all-time extremes.
@@ -1195,19 +1440,20 @@ class Query(graphene.ObjectType):
 from app.graphql_security import SecureGraphQLSchema
 
 schema = SecureGraphQLSchema(
-    query=Query, 
-    mutation=Mutation, 
+    query=Query,
+    mutation=Mutation,
     types=[
-        CreateSensorReadingInput, 
-        RegisterInput, 
+        CreateSensorReadingInput,
+        RegisterInput,
         LoginInput,
         EmailVerificationInput,
         PasswordResetRequestInput,
         PasswordResetInput,
-        LogoutInput
+        LogoutInput,
+        CreateRingSnapshotInput
     ],
-    max_depth=8,  # Appropriate for our schema depth
-    max_complexity=150,  # Allows filtered queries but prevents abuse
-    timeout_seconds=30,  # Reasonable timeout for database operations
+    max_depth=8,
+    max_complexity=150,
+    timeout_seconds=30,
     enable_security_logging=True
 )

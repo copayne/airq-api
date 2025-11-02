@@ -401,6 +401,23 @@ class ApplicationErrorLog(db.Model):
         """Return string representation of ApplicationErrorLog instance."""
         return f'<ApplicationErrorLog {self.level}: {self.message[:50]}...>'
 
+class RingSnapshot(db.Model):
+    """Model for storing Ring camera snapshot metadata."""
+    __tablename__ = 'ring_snapshots'
+
+    id = db.Column(db.Integer, primary_key=True)
+    device_id = db.Column(db.String(100), nullable=False, index=True)
+    device_name = db.Column(db.String(255), nullable=False)
+    image_path = db.Column(db.String(500), nullable=False)
+    capture_timestamp = db.Column(db.DateTime, nullable=False, index=True)
+    file_size = db.Column(db.Integer)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+    def __repr__(self) -> str:
+        """Return string representation of RingSnapshot instance."""
+        return f'<RingSnapshot {self.device_name} at {self.capture_timestamp}>'
+
+
 # Composite indexes for critical query performance
 # These indexes optimize the most frequent query patterns identified in OPTIMIZE.md
 
@@ -415,3 +432,6 @@ db.Index('idx_sensor_locations_location_current', SensorLocation.location_id, Se
 
 # Index for error log queries (timestamp + level)
 db.Index('idx_application_error_logs_timestamp_level', ApplicationErrorLog.timestamp, ApplicationErrorLog.level)
+
+# Index for ring snapshot queries (device_id + capture_timestamp)
+db.Index('idx_ring_snapshots_device_time', RingSnapshot.device_id, RingSnapshot.capture_timestamp)
