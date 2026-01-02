@@ -1,7 +1,7 @@
 import graphene
 from graphene_sqlalchemy import SQLAlchemyObjectType
 from typing import Optional, List, Any, Dict
-from app.models import CO2Reading, ErrorLog, HumidityReading, Location, Sensor, SensorLocation, SensorReading as SensorReadingModel, TemperatureReading, User, RingSnapshot, Camera
+from app.models import CO2Reading, ErrorLog, HumidityReading, Location, Sensor, SensorLocation, SensorReading as SensorReadingModel, TemperatureReading, User, RingSnapshot, Camera, RingDevice
 from app import db
 from sqlalchemy import and_, or_, desc, asc
 from sqlalchemy.orm import joinedload, selectinload
@@ -326,6 +326,28 @@ class MetricsObject(graphene.ObjectType):
     temp_lowest_all_time = graphene.Float()
     co2_highest_all_time = graphene.Int()
     co2_lowest_all_time = graphene.Int()
+
+
+class AirQualityDistribution(graphene.ObjectType):
+    """Air quality condition distribution across sensor readings."""
+    good = graphene.Int(description="Number of readings with good air quality conditions")
+    moderate = graphene.Int(description="Number of readings with moderate air quality conditions")
+    poor = graphene.Int(description="Number of readings with poor air quality conditions")
+    total = graphene.Int(description="Total number of readings analyzed")
+
+
+class AirQualityDistributionsByPeriod(graphene.ObjectType):
+    """Air quality distributions across multiple time periods."""
+    one_day = graphene.Field(AirQualityDistribution, description="Distribution for last 24 hours")
+    thirty_days = graphene.Field(AirQualityDistribution, description="Distribution for last 30 days")
+    all_time = graphene.Field(AirQualityDistribution, description="Distribution for all historical data")
+
+
+class DailyAirQualityScore(graphene.ObjectType):
+    """Air quality score for a single day."""
+    date = graphene.String(required=True, description="Date in YYYY-MM-DD format")
+    score = graphene.Float(description="Air quality score (0-100, 100 = best). Null if no data.")
+    reading_count = graphene.Int(required=True, description="Number of readings for this day")
 
 
 class UserObject(SQLAlchemyObjectType):
@@ -915,6 +937,12 @@ class RingSnapshotObject(SQLAlchemyObjectType):
         return self.camera
 
 
+class RingDeviceObject(SQLAlchemyObjectType):
+    """GraphQL object for Ring alarm devices (contact sensors, motion detectors, etc.)."""
+    class Meta:
+        model = RingDevice
+
+
 class CreateRingSnapshotInput(graphene.InputObjectType):
     """Input for manually creating a ring snapshot record."""
     camera_id = graphene.Int(required=True)
@@ -1119,6 +1147,83 @@ class CaptureRingSnapshot(graphene.Mutation):
             )
 
 
+class RingDeviceInput(graphene.InputObjectType):
+    """Input for updating/creating a Ring device (static info only)."""
+    device_id = graphene.String(required=True)
+    device_type = graphene.String(required=True)
+    name = graphene.String(required=True)
+    location = graphene.String()
+
+
+class BatchUpdateRingDevices(graphene.Mutation):
+    """Batch update Ring devices from frontend Ring API data."""
+    class Arguments:
+        devices = graphene.List(RingDeviceInput, required=True)
+
+    success = graphene.Boolean()
+    message = graphene.String()
+    devices_updated = graphene.Int()
+    devices_created = graphene.Int()
+
+    @staticmethod
+    def mutate(root: Any, info: Any, devices: list) -> 'BatchUpdateRingDevices':
+        """
+        Batch update or create Ring devices from frontend.
+
+        Only updates static device info (name, type, location).
+        Real-time data (battery, status) managed via websocket.
+        """
+        try:
+            devices_updated = 0
+            devices_created = 0
+
+            for device_data in devices:
+                device_id = device_data.device_id
+
+                device = RingDevice.query.filter_by(device_id=device_id).first()
+
+                if device:
+                    # Update static device info only
+                    device.device_type = device_data.device_type
+                    device.name = device_data.name
+                    device.location = device_data.get('location', device.location)
+                    device.is_active = True
+                    device.updated_at = datetime.utcnow()
+                    devices_updated += 1
+                else:
+                    # Create new device with static info only
+                    device = RingDevice(
+                        device_id=device_id,
+                        device_type=device_data.device_type,
+                        name=device_data.name,
+                        location=device_data.get('location', ''),
+                        is_active=True
+                    )
+                    db.session.add(device)
+                    devices_created += 1
+
+            db.session.commit()
+
+            logger.info(f"Batch updated Ring devices: {devices_updated} updated, {devices_created} created")
+
+            return BatchUpdateRingDevices(
+                success=True,
+                message=f"Successfully updated {devices_updated + devices_created} devices",
+                devices_updated=devices_updated,
+                devices_created=devices_created
+            )
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Batch update Ring devices failed: {e}")
+            return BatchUpdateRingDevices(
+                success=False,
+                message=f"Batch update failed: {str(e)}",
+                devices_updated=0,
+                devices_created=0
+            )
+
+
 class Mutation(graphene.ObjectType):
     create_sensor_reading = CreateSensorReading.Field()
     register_user = RegisterUser.Field()
@@ -1129,6 +1234,7 @@ class Mutation(graphene.ObjectType):
     logout_user = LogoutUser.Field()
     create_ring_snapshot = CreateRingSnapshot.Field()
     capture_ring_snapshot = CaptureRingSnapshot.Field()
+    batch_update_ring_devices = BatchUpdateRingDevices.Field()
 
 class Query(graphene.ObjectType):
     sensors = graphene.List(SensorObject)
@@ -1147,6 +1253,14 @@ class Query(graphene.ObjectType):
     # Metrics query
     metrics = graphene.Field(MetricsObject)
 
+    # Air quality distribution queries
+    air_quality_distribution = graphene.Field(AirQualityDistribution)
+    air_quality_distributions_by_period = graphene.Field(AirQualityDistributionsByPeriod)
+    daily_air_quality_scores = graphene.List(
+        DailyAirQualityScore,
+        days=graphene.Int(default_value=365, description="Number of days to include (default 365)")
+    )
+
     # Camera queries
     cameras = graphene.List(CameraObject)
     camera = graphene.Field(CameraObject, id=graphene.Int(), device_id=graphene.String())
@@ -1161,6 +1275,10 @@ class Query(graphene.ObjectType):
         RingSnapshotObject,
         camera_id=graphene.Int()
     )
+
+    # Ring device queries
+    ring_devices = graphene.List(RingDeviceObject)
+    ring_device = graphene.Field(RingDeviceObject, id=graphene.Int(), device_id=graphene.String())
 
     sensor = graphene.Field(SensorObject, id=graphene.Int(required=True))
     location = graphene.Field(LocationObject, id=graphene.Int(required=True))
@@ -1290,6 +1408,23 @@ class Query(graphene.ObjectType):
 
         return query.order_by(desc(RingSnapshot.capture_timestamp)).first()
 
+    def resolve_ring_devices(self, info: Any) -> List[RingDevice]:
+        """Get all Ring alarm devices."""
+        return RingDevice.query.filter_by(is_active=True).order_by(RingDevice.name).all()
+
+    def resolve_ring_device(
+        self,
+        info: Any,
+        id: Optional[int] = None,
+        device_id: Optional[str] = None
+    ) -> Optional[RingDevice]:
+        """Get a Ring device by ID or device_id."""
+        if id:
+            return RingDevice.query.get(id)
+        elif device_id:
+            return RingDevice.query.filter_by(device_id=device_id).first()
+        return None
+
     def resolve_metrics(self, info: Any) -> Optional[MetricsObject]:
         """Get dashboard metrics including running averages and all-time extremes.
 
@@ -1382,6 +1517,225 @@ class Query(graphene.ObjectType):
                 extra={
                     'extra_context': {
                         'operation': 'resolve_metrics_error',
+                        'error_type': type(e).__name__
+                    }
+                }
+            )
+            return None
+
+    def resolve_air_quality_distribution(self, info: Any) -> Optional[AirQualityDistribution]:
+        """Calculate air quality condition distribution across all current sensor readings.
+
+        Analyzes sensor readings from the currently active date range (based on context filters)
+        and returns the count of readings in each condition category (good, moderate, poor).
+
+        Business logic for condition assessment is handled server-side using centralized
+        threshold definitions.
+        """
+        from app.air_quality import calculate_distribution
+
+        try:
+            # Get filtered readings (respects the same filters as the dashboard)
+            # Use the context's sensor data criteria if available
+            context = info.context
+
+            # Default to last 90 days if no specific filters
+            query = SensorReadingModel.query.options(
+                joinedload(SensorReadingModel.co2_reading),
+                joinedload(SensorReadingModel.temperature_reading),
+                joinedload(SensorReadingModel.humidity_reading)
+            )
+
+            # Apply default date filter (last 90 days)
+            ninety_days_ago = datetime.utcnow() - timedelta(days=90)
+            query = query.filter(SensorReadingModel.reading_time >= ninety_days_ago)
+
+            # Get readings
+            readings = query.all()
+
+            if not readings:
+                return AirQualityDistribution(
+                    good=0,
+                    moderate=0,
+                    poor=0,
+                    total=0
+                )
+
+            # Calculate distribution using business logic
+            distribution = calculate_distribution(readings)
+
+            logger.info(
+                "Air quality distribution calculated",
+                extra={
+                    'extra_context': {
+                        'operation': 'resolve_air_quality_distribution',
+                        'total_readings': distribution['total'],
+                        'good_count': distribution['good'],
+                        'moderate_count': distribution['moderate'],
+                        'poor_count': distribution['poor']
+                    }
+                }
+            )
+
+            return AirQualityDistribution(
+                good=distribution['good'],
+                moderate=distribution['moderate'],
+                poor=distribution['poor'],
+                total=distribution['total']
+            )
+
+        except Exception as e:
+            logger.error(
+                "Failed to calculate air quality distribution",
+                exc_info=True,
+                extra={
+                    'extra_context': {
+                        'operation': 'resolve_air_quality_distribution_error',
+                        'error_type': type(e).__name__
+                    }
+                }
+            )
+            return None
+
+    def resolve_air_quality_distributions_by_period(self, info: Any) -> Optional[AirQualityDistributionsByPeriod]:
+        """Calculate air quality distributions for multiple time periods.
+
+        Returns distributions for:
+        - Last 24 hours (1 day)
+        - Last 30 days
+        - All time (all historical data)
+
+        Business logic for condition assessment is handled server-side using centralized
+        threshold definitions and weighted scoring.
+        """
+        from app.air_quality import calculate_distribution
+
+        try:
+            # Calculate time boundaries
+            now = datetime.utcnow()
+            one_day_ago = now - timedelta(days=1)
+            thirty_days_ago = now - timedelta(days=30)
+
+            # Base query with eager loading
+            base_query = SensorReadingModel.query.options(
+                joinedload(SensorReadingModel.co2_reading),
+                joinedload(SensorReadingModel.temperature_reading),
+                joinedload(SensorReadingModel.humidity_reading)
+            )
+
+            # Get readings for each time period
+            one_day_readings = base_query.filter(
+                SensorReadingModel.reading_time >= one_day_ago
+            ).all()
+
+            thirty_day_readings = base_query.filter(
+                SensorReadingModel.reading_time >= thirty_days_ago
+            ).all()
+
+            all_time_readings = base_query.all()
+
+            # Calculate distributions
+            one_day_dist = calculate_distribution(one_day_readings)
+            thirty_day_dist = calculate_distribution(thirty_day_readings)
+            all_time_dist = calculate_distribution(all_time_readings)
+
+            logger.info(
+                "Air quality distributions by period calculated",
+                extra={
+                    'extra_context': {
+                        'operation': 'resolve_air_quality_distributions_by_period',
+                        'one_day_total': one_day_dist['total'],
+                        'thirty_day_total': thirty_day_dist['total'],
+                        'all_time_total': all_time_dist['total']
+                    }
+                }
+            )
+
+            return AirQualityDistributionsByPeriod(
+                one_day=AirQualityDistribution(
+                    good=one_day_dist['good'],
+                    moderate=one_day_dist['moderate'],
+                    poor=one_day_dist['poor'],
+                    total=one_day_dist['total']
+                ),
+                thirty_days=AirQualityDistribution(
+                    good=thirty_day_dist['good'],
+                    moderate=thirty_day_dist['moderate'],
+                    poor=thirty_day_dist['poor'],
+                    total=thirty_day_dist['total']
+                ),
+                all_time=AirQualityDistribution(
+                    good=all_time_dist['good'],
+                    moderate=all_time_dist['moderate'],
+                    poor=all_time_dist['poor'],
+                    total=all_time_dist['total']
+                )
+            )
+
+        except Exception as e:
+            logger.error(
+                "Failed to calculate air quality distributions by period",
+                exc_info=True,
+                extra={
+                    'extra_context': {
+                        'operation': 'resolve_air_quality_distributions_by_period_error',
+                        'error_type': type(e).__name__
+                    }
+                }
+            )
+            return None
+
+    def resolve_daily_air_quality_scores(self, info: Any, days: int = 365) -> Optional[List[DailyAirQualityScore]]:
+        """Calculate daily air quality scores for heatmap visualization.
+
+        Returns a list of daily scores for the specified number of days,
+        with each score representing the average air quality for that day.
+        Score ranges from 0-100 where 100 is best air quality.
+        """
+        from app.air_quality import calculate_daily_scores
+
+        try:
+            # Get readings for the requested time period
+            start_date = datetime.utcnow() - timedelta(days=days)
+            query = SensorReadingModel.query.options(
+                joinedload(SensorReadingModel.co2_reading),
+                joinedload(SensorReadingModel.temperature_reading),
+                joinedload(SensorReadingModel.humidity_reading)
+            ).filter(SensorReadingModel.reading_time >= start_date)
+
+            readings = query.all()
+
+            # Calculate daily scores
+            daily_scores = calculate_daily_scores(readings, days)
+
+            logger.info(
+                "Daily air quality scores calculated",
+                extra={
+                    'extra_context': {
+                        'operation': 'resolve_daily_air_quality_scores',
+                        'days_requested': days,
+                        'total_readings': len(readings),
+                        'days_with_data': sum(1 for d in daily_scores if d['score'] is not None)
+                    }
+                }
+            )
+
+            return [
+                DailyAirQualityScore(
+                    date=score['date'],
+                    score=score['score'],
+                    reading_count=score['readingCount']
+                )
+                for score in daily_scores
+            ]
+
+        except Exception as e:
+            logger.error(
+                "Failed to calculate daily air quality scores",
+                exc_info=True,
+                extra={
+                    'extra_context': {
+                        'operation': 'resolve_daily_air_quality_scores_error',
                         'error_type': type(e).__name__
                     }
                 }

@@ -441,6 +441,29 @@ class RingSnapshot(db.Model):
         return f'<RingSnapshot camera_id={self.camera_id} at {self.capture_timestamp}>'
 
 
+class RingDevice(db.Model):
+    """
+    Model for storing Ring device metadata (sensors, cameras, etc.).
+
+    Stores static device information only. Real-time data (battery, status)
+    is managed via websocket and not persisted to database.
+    """
+    __tablename__ = 'ring_devices'
+
+    id = db.Column(db.Integer, primary_key=True)
+    device_id = db.Column(db.String(100), nullable=False, unique=True, index=True)
+    device_type = db.Column(db.String(50), nullable=False, index=True)
+    name = db.Column(db.String(255), nullable=False)
+    location = db.Column(db.String(255))
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self) -> str:
+        """Return string representation of RingDevice instance."""
+        return f'<RingDevice {self.name} ({self.device_type})>'
+
+
 # Composite indexes for critical query performance
 # These indexes optimize the most frequent query patterns identified in OPTIMIZE.md
 
