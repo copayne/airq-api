@@ -1,5 +1,5 @@
 from app import create_app, db
-from app.models import CO2Reading, ErrorLog, HumidityReading, Location, Sensor, SensorLocation, SensorReading, TemperatureReading, ApplicationErrorLog
+from app.models import CO2Reading, ErrorLog, HumidityReading, Location, Sensor, SensorLocation, SensorReading, TemperatureReading, ApplicationErrorLog, DashboardLayout
 import logging
 
 def init_db():

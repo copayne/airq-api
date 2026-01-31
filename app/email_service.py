@@ -122,6 +122,44 @@ class EmailService:
         
         return self._send_email(user_email, subject, text_body, html_body)
     
+    def send_co2_alert(self, user_email: str, username: str, location_label: str, co2_ppm: int, severity: str) -> bool:
+        """Send CO2 threshold alert email."""
+        severity_upper = severity.upper()
+        color = '#FF0000' if severity == 'critical' else '#FFA500'
+
+        subject = f"AirQ - CO2 {severity_upper} Alert: {co2_ppm} ppm at {location_label}"
+
+        html_body = f"""
+        <html>
+        <body>
+            <h2 style="color: {color};">CO2 {severity_upper} Alert</h2>
+            <p>Hi {username},</p>
+            <p><strong>{location_label}</strong> has a CO2 level of
+            <strong style="color: {color};">{co2_ppm} ppm</strong> ({severity}).</p>
+            <p>Consider ventilating the area to improve air quality.</p>
+            <p><a href="{self.base_url}/dash" style="background-color: {color}; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px;">View Dashboard</a></p>
+            <p>Best regards,<br>The AirQ Team</p>
+        </body>
+        </html>
+        """
+
+        text_body = f"""
+        CO2 {severity_upper} Alert
+
+        Hi {username},
+
+        {location_label} has a CO2 level of {co2_ppm} ppm ({severity}).
+
+        Consider ventilating the area to improve air quality.
+
+        View your dashboard: {self.base_url}/dash
+
+        Best regards,
+        The AirQ Team
+        """
+
+        return self._send_email(user_email, subject, text_body, html_body)
+
     def _send_email(self, to_email: str, subject: str, text_body: str, html_body: str) -> bool:
         """Send email using configured backend."""
         if self.mock_email:

@@ -235,6 +235,31 @@ class User(db.Model):
         return f'<User {self.username} ({self.role})>'
 
 
+class DashboardLayout(db.Model):
+    """Model for storing user dashboard layout configurations."""
+    __tablename__ = 'dashboard_layouts'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    name = db.Column(db.String(100), nullable=False)
+    layout_data = db.Column(db.JSON, nullable=False)
+    is_last_used = db.Column(db.Boolean, default=False, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, index=True)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationship
+    user = relationship("User", backref=db.backref("dashboard_layouts", lazy="dynamic", cascade="all, delete-orphan"))
+
+    # Unique constraint for name per user
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'name', name='unique_layout_name_per_user'),
+    )
+
+    def __repr__(self) -> str:
+        """Return string representation of DashboardLayout instance."""
+        return f'<DashboardLayout {self.name} (User: {self.user_id})>'
+
+
 class TokenBlacklist(db.Model):
     """Model for tracking blacklisted JWT tokens."""
     __tablename__ = 'token_blacklist'
@@ -294,10 +319,116 @@ class Sensor(db.Model):
         default=datetime.utcnow
     )
     is_active = db.Column(db.Boolean, default=True)
-    
+
+    # Network configuration for health checks
+    ip_address = db.Column(db.String(45))  # IPv4 or IPv6
+    health_check_port = db.Column(db.Integer, default=8080)
+
+    # Health tracking fields (updated automatically)
+    last_reading_time = db.Column(db.DateTime)
+    last_successful_reading_time = db.Column(db.DateTime)
+    consecutive_failures = db.Column(db.Integer, default=0)
+    total_readings = db.Column(db.Integer, default=0)
+    total_failures = db.Column(db.Integer, default=0)
+    last_health_check = db.Column(db.DateTime)
+    last_health_status = db.Column(db.String(20))  # 'healthy', 'degraded', 'offline', 'unknown'
+
     # Relationships
     readings = relationship("SensorReading", back_populates="sensor", lazy="select")
     sensor_locations = relationship("SensorLocation", back_populates="sensor", lazy="select")
+    health_reports = relationship("SensorHealthReport", back_populates="sensor", lazy="select")
+
+    def update_health_on_reading(self, success: bool) -> None:
+        """Update health tracking fields when a reading is received."""
+        from datetime import datetime
+        self.last_reading_time = datetime.utcnow()
+        self.total_readings = (self.total_readings or 0) + 1
+
+        if success:
+            self.last_successful_reading_time = datetime.utcnow()
+            self.consecutive_failures = 0
+            self.last_health_status = 'healthy'
+        else:
+            self.consecutive_failures = (self.consecutive_failures or 0) + 1
+            self.total_failures = (self.total_failures or 0) + 1
+            if self.consecutive_failures >= 10:
+                self.last_health_status = 'offline'
+            elif self.consecutive_failures >= 3:
+                self.last_health_status = 'degraded'
+
+    @property
+    def health_status(self) -> str:
+        """Calculate current health status based on recent activity."""
+        from datetime import datetime, timedelta
+
+        if not self.is_active:
+            return 'inactive'
+
+        if not self.last_reading_time:
+            return 'unknown'
+
+        # Check if sensor has been silent too long (expected every 5-10 minutes)
+        time_since_reading = datetime.utcnow() - self.last_reading_time
+        if time_since_reading > timedelta(minutes=30):
+            return 'offline'
+        elif time_since_reading > timedelta(minutes=15):
+            return 'degraded'
+
+        # Check consecutive failures
+        if (self.consecutive_failures or 0) >= 10:
+            return 'offline'
+        elif (self.consecutive_failures or 0) >= 3:
+            return 'degraded'
+
+        return 'healthy'
+
+    @property
+    def success_rate(self) -> float:
+        """Calculate overall success rate as percentage."""
+        if not self.total_readings:
+            return 0.0
+        failures = self.total_failures or 0
+        return ((self.total_readings - failures) / self.total_readings) * 100
+
+
+class SensorHealthReport(db.Model):
+    """Stores detailed health reports from sensor diagnostics."""
+    __tablename__ = 'sensor_health_reports'
+    id = db.Column(db.Integer, primary_key=True)
+    sensor_id = db.Column(db.Integer, db.ForeignKey('sensors.id'), nullable=False, index=True)
+    report_time = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+    # Service status
+    service_running = db.Column(db.Boolean)
+    service_uptime_seconds = db.Column(db.Integer)
+
+    # Sensor hardware status
+    sensor_connected = db.Column(db.Boolean)
+    sensor_data_ready = db.Column(db.Boolean)
+    sensor_serial_number = db.Column(db.String(50))
+
+    # Last reading info
+    last_co2_ppm = db.Column(db.Integer)
+    last_temperature_celsius = db.Column(db.Float)
+    last_humidity_percentage = db.Column(db.Float)
+    last_reading_time = db.Column(db.DateTime)
+
+    # System metrics
+    system_uptime_seconds = db.Column(db.Integer)
+    disk_usage_percent = db.Column(db.Float)
+    memory_usage_percent = db.Column(db.Float)
+    cpu_temperature_celsius = db.Column(db.Float)
+
+    # Network info
+    api_reachable = db.Column(db.Boolean)
+    api_response_time_ms = db.Column(db.Integer)
+
+    # Error info
+    error_message = db.Column(db.Text)
+    consecutive_failures = db.Column(db.Integer)
+
+    # Relationships
+    sensor = relationship("Sensor", back_populates="health_reports")
     
 
 class Location(db.Model):
@@ -464,6 +595,102 @@ class RingDevice(db.Model):
         return f'<RingDevice {self.name} ({self.device_type})>'
 
 
+class AlertThreshold(db.Model):
+    """Per-user CO2 threshold configuration for alert notifications."""
+    __tablename__ = 'alert_thresholds'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    sensor_id = db.Column(db.Integer, db.ForeignKey('sensors.id', ondelete='CASCADE'), nullable=True, index=True)
+
+    # Threshold levels (PPM)
+    warning_ppm = db.Column(db.Integer, nullable=False, default=1000)
+    critical_ppm = db.Column(db.Integer, nullable=False, default=1500)
+
+    # Cooldown in minutes between alerts
+    cooldown_minutes = db.Column(db.Integer, nullable=False, default=30)
+
+    # Channel toggles
+    email_enabled = db.Column(db.Boolean, nullable=False, default=True)
+    browser_enabled = db.Column(db.Boolean, nullable=False, default=True)
+    ntfy_enabled = db.Column(db.Boolean, nullable=False, default=False)
+
+    # ntfy configuration
+    ntfy_topic = db.Column(db.String(255))
+    ntfy_server = db.Column(db.String(500), default='https://ntfy.sh')
+
+    is_enabled = db.Column(db.Boolean, nullable=False, default=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    user = relationship("User", backref=db.backref("alert_thresholds", lazy="dynamic", cascade="all, delete-orphan"))
+    sensor = relationship("Sensor", backref=db.backref("alert_thresholds", lazy="dynamic"))
+
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'sensor_id', name='unique_user_sensor_threshold'),
+    )
+
+    def __repr__(self) -> str:
+        """Return string representation of AlertThreshold instance."""
+        sensor_label = f"Sensor {self.sensor_id}" if self.sensor_id else "Global"
+        return f'<AlertThreshold {sensor_label} (User: {self.user_id}, W:{self.warning_ppm}/C:{self.critical_ppm})>'
+
+
+class AlertHistory(db.Model):
+    """Log of triggered CO2 threshold alerts."""
+    __tablename__ = 'alert_history'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    sensor_id = db.Column(db.Integer, db.ForeignKey('sensors.id', ondelete='CASCADE'), nullable=False, index=True)
+    reading_id = db.Column(db.Integer, db.ForeignKey('sensor_readings.id', ondelete='CASCADE'), nullable=False)
+    threshold_id = db.Column(db.Integer, db.ForeignKey('alert_thresholds.id', ondelete='CASCADE'), nullable=False)
+
+    co2_ppm = db.Column(db.Integer, nullable=False)
+    severity = db.Column(db.String(20), nullable=False)  # 'warning' or 'critical'
+    channels_sent = db.Column(db.String(255), nullable=False)  # comma-separated
+
+    acknowledged = db.Column(db.Boolean, nullable=False, default=False)
+    acknowledged_at = db.Column(db.DateTime)
+
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+    # Relationships
+    user = relationship("User", backref=db.backref("alert_history", lazy="dynamic"))
+    sensor = relationship("Sensor", backref=db.backref("alert_history", lazy="dynamic"))
+    reading = relationship("SensorReading", backref=db.backref("alert_history", lazy="dynamic"))
+    threshold = relationship("AlertThreshold", backref=db.backref("alert_history", lazy="dynamic"))
+
+    def __repr__(self) -> str:
+        """Return string representation of AlertHistory instance."""
+        return f'<AlertHistory {self.severity} CO2={self.co2_ppm}ppm (User: {self.user_id})>'
+
+
+class AlertCooldown(db.Model):
+    """Tracks last alert time per user/sensor for throttling."""
+    __tablename__ = 'alert_cooldowns'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    sensor_id = db.Column(db.Integer, db.ForeignKey('sensors.id', ondelete='CASCADE'), nullable=False, index=True)
+
+    last_alert_time = db.Column(db.DateTime, nullable=False)
+    last_severity = db.Column(db.String(20), nullable=False)
+
+    # Relationships
+    user = relationship("User", backref=db.backref("alert_cooldowns", lazy="dynamic"))
+    sensor = relationship("Sensor", backref=db.backref("alert_cooldowns", lazy="dynamic"))
+
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'sensor_id', name='unique_user_sensor_cooldown'),
+    )
+
+    def __repr__(self) -> str:
+        """Return string representation of AlertCooldown instance."""
+        return f'<AlertCooldown User:{self.user_id} Sensor:{self.sensor_id} Last:{self.last_alert_time}>'
+
+
 # Composite indexes for critical query performance
 # These indexes optimize the most frequent query patterns identified in OPTIMIZE.md
 
@@ -481,3 +708,9 @@ db.Index('idx_application_error_logs_timestamp_level', ApplicationErrorLog.times
 
 # Index for ring snapshot queries (camera_id + capture_timestamp)
 db.Index('idx_ring_snapshots_camera_time', RingSnapshot.camera_id, RingSnapshot.capture_timestamp)
+
+# Index for dashboard layout queries (user_id + is_last_used)
+db.Index('idx_dashboard_layouts_user_last_used', DashboardLayout.user_id, DashboardLayout.is_last_used)
+
+# Index for sensor health report queries (sensor_id + report_time)
+db.Index('idx_sensor_health_reports_sensor_time', SensorHealthReport.sensor_id, SensorHealthReport.report_time)

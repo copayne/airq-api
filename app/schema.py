@@ -1,13 +1,15 @@
 import graphene
 from graphene_sqlalchemy import SQLAlchemyObjectType
 from typing import Optional, List, Any, Dict
-from app.models import CO2Reading, ErrorLog, HumidityReading, Location, Sensor, SensorLocation, SensorReading as SensorReadingModel, TemperatureReading, User, RingSnapshot, Camera, RingDevice
+from app.models import CO2Reading, ErrorLog, HumidityReading, Location, Sensor, SensorLocation, SensorReading as SensorReadingModel, TemperatureReading, User, RingSnapshot, Camera, RingDevice, DashboardLayout, SensorHealthReport, AlertThreshold, AlertHistory
+import requests
 from app import db
 from sqlalchemy import and_, or_, desc, asc
 from sqlalchemy.orm import joinedload, selectinload
 from datetime import datetime, timedelta
 import logging
 from app.auth import require_admin, require_user, get_user_from_context
+from app.cache import cached_query, clear_cache
 
 logger = logging.getLogger(__name__)
 
@@ -76,10 +78,19 @@ class SensorReadingObject(SQLAlchemyObjectType):
     
     def resolve_location(self, info: Any) -> Optional[Location]:
         """Get the location where this sensor reading was taken.
-        
-        Uses optimized database query to find the location based on reading timestamp.
+
+        Uses pre-loaded sensor_locations data to avoid N+1 queries.
+        The sensor_locations are eagerly loaded in the main query.
         """
-        # Optimized database query instead of Python loop
+        # Use pre-loaded sensor_locations from the sensor relationship
+        # This avoids N+1 queries since the data is already loaded
+        if hasattr(self, 'sensor') and self.sensor and hasattr(self.sensor, 'sensor_locations'):
+            for sensor_location in self.sensor.sensor_locations:
+                if (sensor_location.start_time <= self.reading_time and
+                    (sensor_location.end_time is None or sensor_location.end_time >= self.reading_time)):
+                    return sensor_location.location
+
+        # Fallback to database query only if sensor_locations not pre-loaded
         sensor_location = SensorLocation.query.filter(
             SensorLocation.sensor_id == self.sensor_id,
             SensorLocation.start_time <= self.reading_time,
@@ -88,7 +99,7 @@ class SensorReadingObject(SQLAlchemyObjectType):
                 SensorLocation.end_time >= self.reading_time
             )
         ).options(joinedload(SensorLocation.location)).first()
-        
+
         return sensor_location.location if sensor_location else None
     
 class SensorObject(SQLAlchemyObjectType):
@@ -130,7 +141,85 @@ class SensorObject(SQLAlchemyObjectType):
             joinedload(SensorReadingModel.co2_reading)
         ).order_by(desc(SensorReadingModel.reading_time)).first()
 
-    
+
+class SensorHealthReportObject(SQLAlchemyObjectType):
+    """GraphQL type for detailed sensor health reports."""
+    class Meta:
+        model = SensorHealthReport
+
+
+class SensorHealthObject(graphene.ObjectType):
+    """GraphQL type for sensor health summary."""
+    sensor_id = graphene.Int(required=True)
+    sensor_name = graphene.String()
+    health_status = graphene.String(required=True)  # healthy, degraded, offline, unknown, inactive
+    is_active = graphene.Boolean()
+
+    # Timing info
+    last_reading_time = graphene.DateTime()
+    last_successful_reading_time = graphene.DateTime()
+    minutes_since_last_reading = graphene.Int()
+
+    # Failure tracking
+    consecutive_failures = graphene.Int()
+    total_readings = graphene.Int()
+    total_failures = graphene.Int()
+    success_rate = graphene.Float()
+
+    # Network info
+    ip_address = graphene.String()
+    health_check_port = graphene.Int()
+    is_reachable = graphene.Boolean()
+
+    # Latest reading values (for quick diagnostics)
+    latest_co2_ppm = graphene.Int()
+    latest_temperature_celsius = graphene.Float()
+    latest_humidity_percentage = graphene.Float()
+
+    # Last health check
+    last_health_check = graphene.DateTime()
+    last_health_report = graphene.Field(SensorHealthReportObject)
+
+
+class PingSensorResult(graphene.ObjectType):
+    """Result of pinging a sensor for health status."""
+    success = graphene.Boolean(required=True)
+    message = graphene.String()
+    sensor_id = graphene.Int()
+
+    # Service status
+    service_running = graphene.Boolean()
+    service_uptime_seconds = graphene.Int()
+
+    # Sensor hardware status
+    sensor_connected = graphene.Boolean()
+    sensor_data_ready = graphene.Boolean()
+    sensor_serial_number = graphene.String()
+
+    # Last reading values
+    last_co2_ppm = graphene.Int()
+    last_temperature_celsius = graphene.Float()
+    last_humidity_percentage = graphene.Float()
+    last_reading_time = graphene.DateTime()
+
+    # System metrics
+    system_uptime_seconds = graphene.Int()
+    disk_usage_percent = graphene.Float()
+    memory_usage_percent = graphene.Float()
+    cpu_temperature_celsius = graphene.Float()
+
+    # API connectivity
+    api_reachable = graphene.Boolean()
+    api_response_time_ms = graphene.Int()
+
+    # Error info
+    error_message = graphene.String()
+    consecutive_failures = graphene.Int()
+
+    # Response time for this ping
+    ping_response_time_ms = graphene.Int()
+
+
 class SensorDataFilterInput(graphene.InputObjectType):
     start_date = graphene.DateTime()
     end_date = graphene.DateTime()
@@ -233,8 +322,30 @@ class CreateSensorReading(graphene.Mutation):
                 )
                 db.session.add(co2_reading)
             
+            # Update sensor health tracking
+            sensor = Sensor.query.get(input.sensor_id)
+            if sensor:
+                sensor.update_health_on_reading(success=True)
+                db.session.add(sensor)
+
             db.session.commit()
-            
+
+            # Check CO2 thresholds and send alerts (failures never break ingestion)
+            if input.co2_ppm is not None:
+                try:
+                    from app.alert_service import check_and_send_alerts
+                    check_and_send_alerts(input.sensor_id, sensor_reading.id, input.co2_ppm)
+                except Exception:
+                    logger.error(
+                        "Alert check failed after sensor reading commit",
+                        exc_info=True,
+                        extra={'extra_context': {
+                            'sensor_id': input.sensor_id,
+                            'reading_id': sensor_reading.id,
+                            'operation': 'alert_check_post_commit_error',
+                        }}
+                    )
+
             logger.info(
                 "Sensor reading created successfully",
                 extra={
@@ -248,7 +359,7 @@ class CreateSensorReading(graphene.Mutation):
                     }
                 }
             )
-            
+
             return CreateSensorReading(
                 sensor_reading=sensor_reading,
                 success=True,
@@ -1224,6 +1335,1793 @@ class BatchUpdateRingDevices(graphene.Mutation):
             )
 
 
+# ============================================================================
+# Location Management Mutations
+# ============================================================================
+
+class CreateLocationInput(graphene.InputObjectType):
+    """Input for creating a new location."""
+    name = graphene.String(required=True, description="Location name (required, max 100 chars)")
+    description = graphene.String(description="Location description (optional, max 500 chars)")
+
+
+class UpdateLocationInput(graphene.InputObjectType):
+    """Input for updating an existing location."""
+    id = graphene.Int(required=True, description="Location ID to update")
+    name = graphene.String(description="New location name")
+    description = graphene.String(description="New location description")
+
+
+class LocationPayload(graphene.ObjectType):
+    """Response payload for location mutations."""
+    location = graphene.Field(LocationObject)
+    success = graphene.Boolean(required=True)
+    message = graphene.String()
+    errors = graphene.List(graphene.String)
+
+
+class DeletePayload(graphene.ObjectType):
+    """Response payload for delete mutations."""
+    success = graphene.Boolean(required=True)
+    message = graphene.String()
+    errors = graphene.List(graphene.String)
+
+
+class CreateLocation(graphene.Mutation):
+    """Create a new location."""
+    class Arguments:
+        input = CreateLocationInput(required=True)
+
+    Output = LocationPayload
+
+    @staticmethod
+    @require_user
+    def mutate(root: Any, info: Any, input: CreateLocationInput) -> LocationPayload:
+        """Create a new location with validation."""
+        from app.validation import LocationInputValidator
+
+        validator = LocationInputValidator()
+        validation_result = validator.validate_create_input(
+            name=input.name,
+            description=input.description
+        )
+
+        if not validation_result.is_valid:
+            logger.warning(
+                "Location creation validation failed",
+                extra={
+                    'extra_context': {
+                        'name': input.name,
+                        'validation_errors': validation_result.error_messages,
+                        'operation': 'create_location_validation'
+                    }
+                }
+            )
+            return LocationPayload(
+                location=None,
+                success=False,
+                message="Validation failed",
+                errors=validation_result.error_messages
+            )
+
+        try:
+            location = Location(
+                name=input.name.strip(),
+                description=input.description.strip() if input.description else None
+            )
+
+            db.session.add(location)
+            db.session.commit()
+
+            logger.info(
+                "Location created successfully",
+                extra={
+                    'extra_context': {
+                        'location_id': location.id,
+                        'name': location.name,
+                        'operation': 'create_location_success'
+                    }
+                }
+            )
+
+            return LocationPayload(
+                location=location,
+                success=True,
+                message="Location created successfully",
+                errors=[]
+            )
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(
+                "Failed to create location",
+                exc_info=True,
+                extra={
+                    'extra_context': {
+                        'name': input.name,
+                        'operation': 'create_location_error'
+                    }
+                }
+            )
+            return LocationPayload(
+                location=None,
+                success=False,
+                message="Failed to create location",
+                errors=["Database operation failed"]
+            )
+
+
+class UpdateLocation(graphene.Mutation):
+    """Update an existing location."""
+    class Arguments:
+        input = UpdateLocationInput(required=True)
+
+    Output = LocationPayload
+
+    @staticmethod
+    @require_user
+    def mutate(root: Any, info: Any, input: UpdateLocationInput) -> LocationPayload:
+        """Update an existing location with validation."""
+        from app.validation import LocationInputValidator
+
+        validator = LocationInputValidator()
+        validation_result = validator.validate_update_input(
+            location_id=input.id,
+            name=input.name,
+            description=input.description
+        )
+
+        if not validation_result.is_valid:
+            logger.warning(
+                "Location update validation failed",
+                extra={
+                    'extra_context': {
+                        'location_id': input.id,
+                        'validation_errors': validation_result.error_messages,
+                        'operation': 'update_location_validation'
+                    }
+                }
+            )
+            return LocationPayload(
+                location=None,
+                success=False,
+                message="Validation failed",
+                errors=validation_result.error_messages
+            )
+
+        try:
+            location = Location.query.get(input.id)
+
+            if input.name is not None:
+                location.name = input.name.strip()
+            if input.description is not None:
+                location.description = input.description.strip() if input.description else None
+
+            db.session.commit()
+
+            logger.info(
+                "Location updated successfully",
+                extra={
+                    'extra_context': {
+                        'location_id': location.id,
+                        'name': location.name,
+                        'operation': 'update_location_success'
+                    }
+                }
+            )
+
+            return LocationPayload(
+                location=location,
+                success=True,
+                message="Location updated successfully",
+                errors=[]
+            )
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(
+                "Failed to update location",
+                exc_info=True,
+                extra={
+                    'extra_context': {
+                        'location_id': input.id,
+                        'operation': 'update_location_error'
+                    }
+                }
+            )
+            return LocationPayload(
+                location=None,
+                success=False,
+                message="Failed to update location",
+                errors=["Database operation failed"]
+            )
+
+
+class DeleteLocation(graphene.Mutation):
+    """Delete a location."""
+    class Arguments:
+        id = graphene.Int(required=True, description="Location ID to delete")
+
+    Output = DeletePayload
+
+    @staticmethod
+    @require_user
+    def mutate(root: Any, info: Any, id: int) -> DeletePayload:
+        """Delete a location with validation."""
+        from app.validation import LocationInputValidator
+
+        validator = LocationInputValidator()
+        validation_result = validator.validate_delete(location_id=id)
+
+        if not validation_result.is_valid:
+            logger.warning(
+                "Location deletion validation failed",
+                extra={
+                    'extra_context': {
+                        'location_id': id,
+                        'validation_errors': validation_result.error_messages,
+                        'operation': 'delete_location_validation'
+                    }
+                }
+            )
+            return DeletePayload(
+                success=False,
+                message="Validation failed",
+                errors=validation_result.error_messages
+            )
+
+        try:
+            location = Location.query.get(id)
+            location_name = location.name
+
+            db.session.delete(location)
+            db.session.commit()
+
+            logger.info(
+                "Location deleted successfully",
+                extra={
+                    'extra_context': {
+                        'location_id': id,
+                        'name': location_name,
+                        'operation': 'delete_location_success'
+                    }
+                }
+            )
+
+            return DeletePayload(
+                success=True,
+                message=f"Location '{location_name}' deleted successfully",
+                errors=[]
+            )
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(
+                "Failed to delete location",
+                exc_info=True,
+                extra={
+                    'extra_context': {
+                        'location_id': id,
+                        'operation': 'delete_location_error'
+                    }
+                }
+            )
+            return DeletePayload(
+                success=False,
+                message="Failed to delete location",
+                errors=["Database operation failed"]
+            )
+
+
+# ============================================================================
+# Sensor Management Mutations
+# ============================================================================
+
+class CreateSensorInput(graphene.InputObjectType):
+    """Input for creating a new sensor."""
+    name = graphene.String(required=True, description="Sensor name (required, max 100 chars)")
+    model = graphene.String(required=True, description="Sensor model (required, max 100 chars)")
+    installation_date = graphene.DateTime(description="Installation date (defaults to now)")
+
+
+class UpdateSensorInput(graphene.InputObjectType):
+    """Input for updating an existing sensor."""
+    id = graphene.Int(required=True, description="Sensor ID to update")
+    name = graphene.String(description="New sensor name")
+    model = graphene.String(description="New sensor model")
+    is_active = graphene.Boolean(description="Sensor active status")
+
+
+class SensorPayload(graphene.ObjectType):
+    """Response payload for sensor mutations."""
+    sensor = graphene.Field(SensorObject)
+    success = graphene.Boolean(required=True)
+    message = graphene.String()
+    errors = graphene.List(graphene.String)
+
+
+class CreateSensor(graphene.Mutation):
+    """Create a new sensor."""
+    class Arguments:
+        input = CreateSensorInput(required=True)
+
+    Output = SensorPayload
+
+    @staticmethod
+    @require_user
+    def mutate(root: Any, info: Any, input: CreateSensorInput) -> SensorPayload:
+        """Create a new sensor with validation."""
+        from app.validation import SensorInputValidator
+
+        validator = SensorInputValidator()
+        validation_result = validator.validate_create_input(
+            name=input.name,
+            model=input.model,
+            installation_date=input.installation_date
+        )
+
+        if not validation_result.is_valid:
+            logger.warning(
+                "Sensor creation validation failed",
+                extra={
+                    'extra_context': {
+                        'name': input.name,
+                        'model': input.model,
+                        'validation_errors': validation_result.error_messages,
+                        'operation': 'create_sensor_validation'
+                    }
+                }
+            )
+            return SensorPayload(
+                sensor=None,
+                success=False,
+                message="Validation failed",
+                errors=validation_result.error_messages
+            )
+
+        try:
+            sensor = Sensor(
+                name=input.name.strip(),
+                model=input.model.strip(),
+                installation_date=input.installation_date if input.installation_date else datetime.utcnow(),
+                is_active=True
+            )
+
+            db.session.add(sensor)
+            db.session.commit()
+
+            logger.info(
+                "Sensor created successfully",
+                extra={
+                    'extra_context': {
+                        'sensor_id': sensor.id,
+                        'name': sensor.name,
+                        'model': sensor.model,
+                        'operation': 'create_sensor_success'
+                    }
+                }
+            )
+
+            return SensorPayload(
+                sensor=sensor,
+                success=True,
+                message="Sensor created successfully",
+                errors=[]
+            )
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(
+                "Failed to create sensor",
+                exc_info=True,
+                extra={
+                    'extra_context': {
+                        'name': input.name,
+                        'model': input.model,
+                        'operation': 'create_sensor_error'
+                    }
+                }
+            )
+            return SensorPayload(
+                sensor=None,
+                success=False,
+                message="Failed to create sensor",
+                errors=["Database operation failed"]
+            )
+
+
+class UpdateSensor(graphene.Mutation):
+    """Update an existing sensor."""
+    class Arguments:
+        input = UpdateSensorInput(required=True)
+
+    Output = SensorPayload
+
+    @staticmethod
+    @require_user
+    def mutate(root: Any, info: Any, input: UpdateSensorInput) -> SensorPayload:
+        """Update an existing sensor with validation."""
+        from app.validation import SensorInputValidator
+
+        validator = SensorInputValidator()
+        validation_result = validator.validate_update_input(
+            sensor_id=input.id,
+            name=input.name,
+            model=input.model,
+            is_active=input.is_active
+        )
+
+        if not validation_result.is_valid:
+            logger.warning(
+                "Sensor update validation failed",
+                extra={
+                    'extra_context': {
+                        'sensor_id': input.id,
+                        'validation_errors': validation_result.error_messages,
+                        'operation': 'update_sensor_validation'
+                    }
+                }
+            )
+            return SensorPayload(
+                sensor=None,
+                success=False,
+                message="Validation failed",
+                errors=validation_result.error_messages
+            )
+
+        try:
+            sensor = Sensor.query.get(input.id)
+
+            if input.name is not None:
+                sensor.name = input.name.strip()
+            if input.model is not None:
+                sensor.model = input.model.strip()
+            if input.is_active is not None:
+                sensor.is_active = input.is_active
+
+            db.session.commit()
+
+            logger.info(
+                "Sensor updated successfully",
+                extra={
+                    'extra_context': {
+                        'sensor_id': sensor.id,
+                        'name': sensor.name,
+                        'is_active': sensor.is_active,
+                        'operation': 'update_sensor_success'
+                    }
+                }
+            )
+
+            return SensorPayload(
+                sensor=sensor,
+                success=True,
+                message="Sensor updated successfully",
+                errors=[]
+            )
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(
+                "Failed to update sensor",
+                exc_info=True,
+                extra={
+                    'extra_context': {
+                        'sensor_id': input.id,
+                        'operation': 'update_sensor_error'
+                    }
+                }
+            )
+            return SensorPayload(
+                sensor=None,
+                success=False,
+                message="Failed to update sensor",
+                errors=["Database operation failed"]
+            )
+
+
+class DeleteSensor(graphene.Mutation):
+    """Delete a sensor (only if no readings exist)."""
+    class Arguments:
+        id = graphene.Int(required=True, description="Sensor ID to delete")
+
+    Output = DeletePayload
+
+    @staticmethod
+    @require_user
+    def mutate(root: Any, info: Any, id: int) -> DeletePayload:
+        """Delete a sensor with validation."""
+        from app.validation import SensorInputValidator
+
+        validator = SensorInputValidator()
+        validation_result = validator.validate_delete(sensor_id=id)
+
+        if not validation_result.is_valid:
+            logger.warning(
+                "Sensor deletion validation failed",
+                extra={
+                    'extra_context': {
+                        'sensor_id': id,
+                        'validation_errors': validation_result.error_messages,
+                        'operation': 'delete_sensor_validation'
+                    }
+                }
+            )
+            return DeletePayload(
+                success=False,
+                message="Validation failed",
+                errors=validation_result.error_messages
+            )
+
+        try:
+            sensor = Sensor.query.get(id)
+            sensor_name = sensor.name
+
+            # Also delete any sensor_location records
+            SensorLocation.query.filter_by(sensor_id=id).delete()
+
+            db.session.delete(sensor)
+            db.session.commit()
+
+            logger.info(
+                "Sensor deleted successfully",
+                extra={
+                    'extra_context': {
+                        'sensor_id': id,
+                        'name': sensor_name,
+                        'operation': 'delete_sensor_success'
+                    }
+                }
+            )
+
+            return DeletePayload(
+                success=True,
+                message=f"Sensor '{sensor_name}' deleted successfully",
+                errors=[]
+            )
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(
+                "Failed to delete sensor",
+                exc_info=True,
+                extra={
+                    'extra_context': {
+                        'sensor_id': id,
+                        'operation': 'delete_sensor_error'
+                    }
+                }
+            )
+            return DeletePayload(
+                success=False,
+                message="Failed to delete sensor",
+                errors=["Database operation failed"]
+            )
+
+
+class ToggleSensorActive(graphene.Mutation):
+    """Toggle sensor active status."""
+    class Arguments:
+        id = graphene.Int(required=True, description="Sensor ID")
+        is_active = graphene.Boolean(required=True, description="New active status")
+
+    Output = SensorPayload
+
+    @staticmethod
+    @require_user
+    def mutate(root: Any, info: Any, id: int, is_active: bool) -> SensorPayload:
+        """Toggle sensor active status."""
+        sensor = Sensor.query.get(id)
+
+        if not sensor:
+            return SensorPayload(
+                sensor=None,
+                success=False,
+                message=f"Sensor with ID {id} does not exist",
+                errors=["Sensor not found"]
+            )
+
+        try:
+            sensor.is_active = is_active
+            db.session.commit()
+
+            status = "activated" if is_active else "deactivated"
+            logger.info(
+                f"Sensor {status} successfully",
+                extra={
+                    'extra_context': {
+                        'sensor_id': sensor.id,
+                        'name': sensor.name,
+                        'is_active': is_active,
+                        'operation': 'toggle_sensor_active_success'
+                    }
+                }
+            )
+
+            return SensorPayload(
+                sensor=sensor,
+                success=True,
+                message=f"Sensor {status} successfully",
+                errors=[]
+            )
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(
+                "Failed to toggle sensor active status",
+                exc_info=True,
+                extra={
+                    'extra_context': {
+                        'sensor_id': id,
+                        'operation': 'toggle_sensor_active_error'
+                    }
+                }
+            )
+            return SensorPayload(
+                sensor=None,
+                success=False,
+                message="Failed to update sensor",
+                errors=["Database operation failed"]
+            )
+
+
+# ============================================================================
+# Sensor-Location Assignment Mutations
+# ============================================================================
+
+class AssignSensorLocationInput(graphene.InputObjectType):
+    """Input for assigning a sensor to a location."""
+    sensor_id = graphene.Int(required=True, description="Sensor ID to assign")
+    location_id = graphene.Int(required=True, description="Location ID to assign to")
+    start_time = graphene.DateTime(description="Assignment start time (defaults to now)")
+
+
+class MoveSensorInput(graphene.InputObjectType):
+    """Input for moving a sensor to a new location."""
+    sensor_id = graphene.Int(required=True, description="Sensor ID to move")
+    new_location_id = graphene.Int(required=True, description="New location ID")
+    move_time = graphene.DateTime(description="Move time (defaults to now)")
+
+
+class SensorLocationPayload(graphene.ObjectType):
+    """Response payload for sensor-location mutations."""
+    sensor_location = graphene.Field(SensorLocationObject)
+    success = graphene.Boolean(required=True)
+    message = graphene.String()
+    errors = graphene.List(graphene.String)
+
+
+class AssignSensorToLocation(graphene.Mutation):
+    """Assign an unassigned sensor to a location."""
+    class Arguments:
+        input = AssignSensorLocationInput(required=True)
+
+    Output = SensorLocationPayload
+
+    @staticmethod
+    @require_user
+    def mutate(root: Any, info: Any, input: AssignSensorLocationInput) -> SensorLocationPayload:
+        """Assign a sensor to a location."""
+        from app.validation import SensorLocationValidator
+
+        validator = SensorLocationValidator()
+        validation_result = validator.validate_assign(
+            sensor_id=input.sensor_id,
+            location_id=input.location_id
+        )
+
+        if not validation_result.is_valid:
+            logger.warning(
+                "Sensor assignment validation failed",
+                extra={
+                    'extra_context': {
+                        'sensor_id': input.sensor_id,
+                        'location_id': input.location_id,
+                        'validation_errors': validation_result.error_messages,
+                        'operation': 'assign_sensor_validation'
+                    }
+                }
+            )
+            return SensorLocationPayload(
+                sensor_location=None,
+                success=False,
+                message="Validation failed",
+                errors=validation_result.error_messages
+            )
+
+        try:
+            start_time = input.start_time if input.start_time else datetime.utcnow()
+
+            sensor_location = SensorLocation(
+                sensor_id=input.sensor_id,
+                location_id=input.location_id,
+                start_time=start_time,
+                end_time=None,
+                is_current=True
+            )
+
+            db.session.add(sensor_location)
+            db.session.commit()
+
+            logger.info(
+                "Sensor assigned to location successfully",
+                extra={
+                    'extra_context': {
+                        'sensor_location_id': sensor_location.id,
+                        'sensor_id': input.sensor_id,
+                        'location_id': input.location_id,
+                        'operation': 'assign_sensor_success'
+                    }
+                }
+            )
+
+            return SensorLocationPayload(
+                sensor_location=sensor_location,
+                success=True,
+                message="Sensor assigned to location successfully",
+                errors=[]
+            )
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(
+                "Failed to assign sensor to location",
+                exc_info=True,
+                extra={
+                    'extra_context': {
+                        'sensor_id': input.sensor_id,
+                        'location_id': input.location_id,
+                        'operation': 'assign_sensor_error'
+                    }
+                }
+            )
+            return SensorLocationPayload(
+                sensor_location=None,
+                success=False,
+                message="Failed to assign sensor to location",
+                errors=["Database operation failed"]
+            )
+
+
+class MoveSensorToLocation(graphene.Mutation):
+    """Move a sensor from its current location to a new location."""
+    class Arguments:
+        input = MoveSensorInput(required=True)
+
+    Output = SensorLocationPayload
+
+    @staticmethod
+    @require_user
+    def mutate(root: Any, info: Any, input: MoveSensorInput) -> SensorLocationPayload:
+        """Move a sensor to a new location (atomic operation)."""
+        from app.validation import SensorLocationValidator
+
+        validator = SensorLocationValidator()
+        validation_result = validator.validate_move(
+            sensor_id=input.sensor_id,
+            new_location_id=input.new_location_id
+        )
+
+        if not validation_result.is_valid:
+            logger.warning(
+                "Sensor move validation failed",
+                extra={
+                    'extra_context': {
+                        'sensor_id': input.sensor_id,
+                        'new_location_id': input.new_location_id,
+                        'validation_errors': validation_result.error_messages,
+                        'operation': 'move_sensor_validation'
+                    }
+                }
+            )
+            return SensorLocationPayload(
+                sensor_location=None,
+                success=False,
+                message="Validation failed",
+                errors=validation_result.error_messages
+            )
+
+        try:
+            move_time = input.move_time if input.move_time else datetime.utcnow()
+
+            # Find and close current assignment
+            current_assignment = SensorLocation.query.filter_by(
+                sensor_id=input.sensor_id,
+                is_current=True
+            ).first()
+
+            old_location_id = current_assignment.location_id
+            current_assignment.end_time = move_time
+            current_assignment.is_current = False
+
+            # Create new assignment
+            new_assignment = SensorLocation(
+                sensor_id=input.sensor_id,
+                location_id=input.new_location_id,
+                start_time=move_time,
+                end_time=None,
+                is_current=True
+            )
+
+            db.session.add(new_assignment)
+            db.session.commit()
+
+            logger.info(
+                "Sensor moved to new location successfully",
+                extra={
+                    'extra_context': {
+                        'sensor_location_id': new_assignment.id,
+                        'sensor_id': input.sensor_id,
+                        'old_location_id': old_location_id,
+                        'new_location_id': input.new_location_id,
+                        'operation': 'move_sensor_success'
+                    }
+                }
+            )
+
+            return SensorLocationPayload(
+                sensor_location=new_assignment,
+                success=True,
+                message="Sensor moved to new location successfully",
+                errors=[]
+            )
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(
+                "Failed to move sensor to new location",
+                exc_info=True,
+                extra={
+                    'extra_context': {
+                        'sensor_id': input.sensor_id,
+                        'new_location_id': input.new_location_id,
+                        'operation': 'move_sensor_error'
+                    }
+                }
+            )
+            return SensorLocationPayload(
+                sensor_location=None,
+                success=False,
+                message="Failed to move sensor to new location",
+                errors=["Database operation failed"]
+            )
+
+
+class RemoveSensorFromLocation(graphene.Mutation):
+    """Remove a sensor from its current location (unassign)."""
+    class Arguments:
+        sensor_id = graphene.Int(required=True, description="Sensor ID to unassign")
+
+    Output = SensorLocationPayload
+
+    @staticmethod
+    @require_user
+    def mutate(root: Any, info: Any, sensor_id: int) -> SensorLocationPayload:
+        """Remove a sensor from its current location."""
+        from app.validation import SensorLocationValidator
+
+        validator = SensorLocationValidator()
+        validation_result = validator.validate_remove(sensor_id=sensor_id)
+
+        if not validation_result.is_valid:
+            logger.warning(
+                "Sensor removal validation failed",
+                extra={
+                    'extra_context': {
+                        'sensor_id': sensor_id,
+                        'validation_errors': validation_result.error_messages,
+                        'operation': 'remove_sensor_validation'
+                    }
+                }
+            )
+            return SensorLocationPayload(
+                sensor_location=None,
+                success=False,
+                message="Validation failed",
+                errors=validation_result.error_messages
+            )
+
+        try:
+            current_assignment = SensorLocation.query.filter_by(
+                sensor_id=sensor_id,
+                is_current=True
+            ).first()
+
+            location_id = current_assignment.location_id
+            current_assignment.end_time = datetime.utcnow()
+            current_assignment.is_current = False
+
+            db.session.commit()
+
+            logger.info(
+                "Sensor removed from location successfully",
+                extra={
+                    'extra_context': {
+                        'sensor_location_id': current_assignment.id,
+                        'sensor_id': sensor_id,
+                        'location_id': location_id,
+                        'operation': 'remove_sensor_success'
+                    }
+                }
+            )
+
+            return SensorLocationPayload(
+                sensor_location=current_assignment,
+                success=True,
+                message="Sensor removed from location successfully",
+                errors=[]
+            )
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(
+                "Failed to remove sensor from location",
+                exc_info=True,
+                extra={
+                    'extra_context': {
+                        'sensor_id': sensor_id,
+                        'operation': 'remove_sensor_error'
+                    }
+                }
+            )
+            return SensorLocationPayload(
+                sensor_location=None,
+                success=False,
+                message="Failed to remove sensor from location",
+                errors=["Database operation failed"]
+            )
+
+
+# Dashboard Layout Types and Mutations
+
+class DashboardLayoutObject(SQLAlchemyObjectType):
+    """GraphQL type for dashboard layouts."""
+    class Meta:
+        model = DashboardLayout
+        exclude_fields = ('user',)
+
+    layout_data = graphene.JSONString()
+
+    def resolve_layout_data(self, info: Any) -> str:
+        """Return layout data as JSON string."""
+        import json
+        return json.dumps(self.layout_data) if self.layout_data else None
+
+
+class CreateDashboardLayoutInput(graphene.InputObjectType):
+    """Input type for creating a dashboard layout."""
+    name = graphene.String(required=True)
+    layout_data = graphene.JSONString(required=True)
+
+
+class UpdateDashboardLayoutInput(graphene.InputObjectType):
+    """Input type for updating a dashboard layout."""
+    id = graphene.ID(required=True)
+    name = graphene.String()
+    layout_data = graphene.JSONString()
+
+
+class DashboardLayoutMutationResponse(graphene.ObjectType):
+    """Response type for dashboard layout mutations."""
+    success = graphene.Boolean()
+    message = graphene.String()
+    errors = graphene.List(graphene.String)
+    layout = graphene.Field(DashboardLayoutObject)
+
+
+class CreateDashboardLayout(graphene.Mutation):
+    """Create a new dashboard layout."""
+    class Arguments:
+        input = CreateDashboardLayoutInput(required=True)
+
+    Output = DashboardLayoutMutationResponse
+
+    @staticmethod
+    @require_user
+    def mutate(root: Any, info: Any, input: CreateDashboardLayoutInput) -> DashboardLayoutMutationResponse:
+        """Create a new dashboard layout for the authenticated user."""
+        from app.validation import DashboardLayoutValidator
+        import json
+
+        user = get_user_from_context(info)
+        if not user:
+            return DashboardLayoutMutationResponse(
+                success=False,
+                message="Authentication required",
+                errors=["You must be logged in to create a layout"]
+            )
+
+        # Parse layout data from JSON string
+        try:
+            layout_data = json.loads(input.layout_data) if isinstance(input.layout_data, str) else input.layout_data
+        except json.JSONDecodeError as e:
+            return DashboardLayoutMutationResponse(
+                success=False,
+                message="Invalid JSON in layout_data",
+                errors=[str(e)]
+            )
+
+        # Validate input
+        validator = DashboardLayoutValidator()
+        validation_result = validator.validate_create_input(
+            user_id=user.id,
+            name=input.name,
+            layout_data=layout_data
+        )
+
+        if not validation_result.is_valid:
+            logger.warning(
+                "Dashboard layout validation failed",
+                extra={
+                    'extra_context': {
+                        'user_id': user.id,
+                        'validation_errors': validation_result.error_messages,
+                        'operation': 'create_dashboard_layout_validation'
+                    }
+                }
+            )
+            return DashboardLayoutMutationResponse(
+                success=False,
+                message="Validation failed",
+                errors=validation_result.error_messages
+            )
+
+        try:
+            # Create the layout
+            layout = DashboardLayout(
+                user_id=user.id,
+                name=input.name.strip(),
+                layout_data=layout_data,
+                is_last_used=True
+            )
+
+            # Clear is_last_used from other layouts
+            DashboardLayout.query.filter_by(user_id=user.id).update({'is_last_used': False})
+
+            db.session.add(layout)
+            db.session.commit()
+
+            logger.info(
+                "Dashboard layout created successfully",
+                extra={
+                    'extra_context': {
+                        'user_id': user.id,
+                        'layout_id': layout.id,
+                        'layout_name': layout.name,
+                        'operation': 'create_dashboard_layout_success'
+                    }
+                }
+            )
+
+            return DashboardLayoutMutationResponse(
+                success=True,
+                message="Layout saved successfully",
+                layout=layout
+            )
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(
+                "Failed to create dashboard layout",
+                exc_info=True,
+                extra={
+                    'extra_context': {
+                        'user_id': user.id,
+                        'operation': 'create_dashboard_layout_error'
+                    }
+                }
+            )
+            return DashboardLayoutMutationResponse(
+                success=False,
+                message="Failed to save layout",
+                errors=[str(e)]
+            )
+
+
+class UpdateDashboardLayout(graphene.Mutation):
+    """Update an existing dashboard layout."""
+    class Arguments:
+        input = UpdateDashboardLayoutInput(required=True)
+
+    Output = DashboardLayoutMutationResponse
+
+    @staticmethod
+    @require_user
+    def mutate(root: Any, info: Any, input: UpdateDashboardLayoutInput) -> DashboardLayoutMutationResponse:
+        """Update a dashboard layout for the authenticated user."""
+        from app.validation import DashboardLayoutValidator
+        import json
+
+        user = get_user_from_context(info)
+        if not user:
+            return DashboardLayoutMutationResponse(
+                success=False,
+                message="Authentication required",
+                errors=["You must be logged in to update a layout"]
+            )
+
+        # Parse layout data if provided
+        layout_data = None
+        if input.layout_data:
+            try:
+                layout_data = json.loads(input.layout_data) if isinstance(input.layout_data, str) else input.layout_data
+            except json.JSONDecodeError as e:
+                return DashboardLayoutMutationResponse(
+                    success=False,
+                    message="Invalid JSON in layout_data",
+                    errors=[str(e)]
+                )
+
+        # Validate input
+        validator = DashboardLayoutValidator()
+        validation_result = validator.validate_update_input(
+            user_id=user.id,
+            layout_id=int(input.id),
+            name=input.name,
+            layout_data=layout_data
+        )
+
+        if not validation_result.is_valid:
+            return DashboardLayoutMutationResponse(
+                success=False,
+                message="Validation failed",
+                errors=validation_result.error_messages
+            )
+
+        try:
+            layout = DashboardLayout.query.filter_by(id=int(input.id), user_id=user.id).first()
+
+            if input.name is not None:
+                layout.name = input.name.strip()
+            if layout_data is not None:
+                layout.layout_data = layout_data
+
+            db.session.commit()
+
+            logger.info(
+                "Dashboard layout updated successfully",
+                extra={
+                    'extra_context': {
+                        'user_id': user.id,
+                        'layout_id': layout.id,
+                        'operation': 'update_dashboard_layout_success'
+                    }
+                }
+            )
+
+            return DashboardLayoutMutationResponse(
+                success=True,
+                message="Layout updated successfully",
+                layout=layout
+            )
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(
+                "Failed to update dashboard layout",
+                exc_info=True,
+                extra={
+                    'extra_context': {
+                        'user_id': user.id,
+                        'layout_id': input.id,
+                        'operation': 'update_dashboard_layout_error'
+                    }
+                }
+            )
+            return DashboardLayoutMutationResponse(
+                success=False,
+                message="Failed to update layout",
+                errors=[str(e)]
+            )
+
+
+class DeleteDashboardLayout(graphene.Mutation):
+    """Delete a dashboard layout."""
+    class Arguments:
+        id = graphene.ID(required=True)
+
+    Output = DashboardLayoutMutationResponse
+
+    @staticmethod
+    @require_user
+    def mutate(root: Any, info: Any, id: str) -> DashboardLayoutMutationResponse:
+        """Delete a dashboard layout for the authenticated user."""
+        from app.validation import DashboardLayoutValidator
+
+        user = get_user_from_context(info)
+        if not user:
+            return DashboardLayoutMutationResponse(
+                success=False,
+                message="Authentication required",
+                errors=["You must be logged in to delete a layout"]
+            )
+
+        # Validate deletion
+        validator = DashboardLayoutValidator()
+        validation_result = validator.validate_delete(
+            user_id=user.id,
+            layout_id=int(id)
+        )
+
+        if not validation_result.is_valid:
+            return DashboardLayoutMutationResponse(
+                success=False,
+                message="Validation failed",
+                errors=validation_result.error_messages
+            )
+
+        try:
+            layout = DashboardLayout.query.filter_by(id=int(id), user_id=user.id).first()
+            was_last_used = layout.is_last_used
+            layout_name = layout.name
+
+            db.session.delete(layout)
+            db.session.commit()
+
+            # If deleted layout was last used, mark oldest remaining as last used
+            if was_last_used:
+                oldest_layout = DashboardLayout.query.filter_by(
+                    user_id=user.id
+                ).order_by(DashboardLayout.created_at.asc()).first()
+                if oldest_layout:
+                    oldest_layout.is_last_used = True
+                    db.session.commit()
+
+            logger.info(
+                "Dashboard layout deleted successfully",
+                extra={
+                    'extra_context': {
+                        'user_id': user.id,
+                        'layout_id': id,
+                        'layout_name': layout_name,
+                        'operation': 'delete_dashboard_layout_success'
+                    }
+                }
+            )
+
+            return DashboardLayoutMutationResponse(
+                success=True,
+                message="Layout deleted successfully"
+            )
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(
+                "Failed to delete dashboard layout",
+                exc_info=True,
+                extra={
+                    'extra_context': {
+                        'user_id': user.id,
+                        'layout_id': id,
+                        'operation': 'delete_dashboard_layout_error'
+                    }
+                }
+            )
+            return DashboardLayoutMutationResponse(
+                success=False,
+                message="Failed to delete layout",
+                errors=[str(e)]
+            )
+
+
+class SetLastUsedLayout(graphene.Mutation):
+    """Set a layout as the last used layout."""
+    class Arguments:
+        id = graphene.ID(required=True)
+
+    Output = DashboardLayoutMutationResponse
+
+    @staticmethod
+    @require_user
+    def mutate(root: Any, info: Any, id: str) -> DashboardLayoutMutationResponse:
+        """Set a layout as the last used for the authenticated user."""
+        user = get_user_from_context(info)
+        if not user:
+            return DashboardLayoutMutationResponse(
+                success=False,
+                message="Authentication required",
+                errors=["You must be logged in"]
+            )
+
+        try:
+            layout = DashboardLayout.query.filter_by(id=int(id), user_id=user.id).first()
+            if not layout:
+                return DashboardLayoutMutationResponse(
+                    success=False,
+                    message="Layout not found",
+                    errors=["Layout does not exist or does not belong to you"]
+                )
+
+            # Clear all is_last_used flags for this user
+            DashboardLayout.query.filter_by(user_id=user.id).update({'is_last_used': False})
+
+            # Set this layout as last used
+            layout.is_last_used = True
+            db.session.commit()
+
+            return DashboardLayoutMutationResponse(
+                success=True,
+                message="Layout set as last used",
+                layout=layout
+            )
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(
+                "Failed to set last used layout",
+                exc_info=True,
+                extra={
+                    'extra_context': {
+                        'user_id': user.id,
+                        'layout_id': id,
+                        'operation': 'set_last_used_layout_error'
+                    }
+                }
+            )
+            return DashboardLayoutMutationResponse(
+                success=False,
+                message="Failed to set last used layout",
+                errors=[str(e)]
+            )
+
+
+class DuplicateDashboardLayout(graphene.Mutation):
+    """Duplicate an existing dashboard layout with a new name."""
+    class Arguments:
+        id = graphene.ID(required=True)
+        new_name = graphene.String(required=True)
+
+    Output = DashboardLayoutMutationResponse
+
+    @staticmethod
+    @require_user
+    def mutate(root: Any, info: Any, id: str, new_name: str) -> DashboardLayoutMutationResponse:
+        """Duplicate a dashboard layout for the authenticated user."""
+        from app.validation import DashboardLayoutValidator
+
+        user = get_user_from_context(info)
+        if not user:
+            return DashboardLayoutMutationResponse(
+                success=False,
+                message="Authentication required",
+                errors=["You must be logged in to duplicate a layout"]
+            )
+
+        # Validate duplication
+        validator = DashboardLayoutValidator()
+        validation_result = validator.validate_duplicate(
+            user_id=user.id,
+            layout_id=int(id),
+            new_name=new_name
+        )
+
+        if not validation_result.is_valid:
+            return DashboardLayoutMutationResponse(
+                success=False,
+                message="Validation failed",
+                errors=validation_result.error_messages
+            )
+
+        try:
+            source_layout = DashboardLayout.query.filter_by(id=int(id), user_id=user.id).first()
+
+            # Create duplicate
+            new_layout = DashboardLayout(
+                user_id=user.id,
+                name=new_name.strip(),
+                layout_data=source_layout.layout_data,
+                is_last_used=False
+            )
+
+            db.session.add(new_layout)
+            db.session.commit()
+
+            logger.info(
+                "Dashboard layout duplicated successfully",
+                extra={
+                    'extra_context': {
+                        'user_id': user.id,
+                        'source_layout_id': id,
+                        'new_layout_id': new_layout.id,
+                        'new_layout_name': new_layout.name,
+                        'operation': 'duplicate_dashboard_layout_success'
+                    }
+                }
+            )
+
+            return DashboardLayoutMutationResponse(
+                success=True,
+                message="Layout duplicated successfully",
+                layout=new_layout
+            )
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(
+                "Failed to duplicate dashboard layout",
+                exc_info=True,
+                extra={
+                    'extra_context': {
+                        'user_id': user.id,
+                        'source_layout_id': id,
+                        'operation': 'duplicate_dashboard_layout_error'
+                    }
+                }
+            )
+            return DashboardLayoutMutationResponse(
+                success=False,
+                message="Failed to duplicate layout",
+                errors=[str(e)]
+            )
+
+
+class PingSensor(graphene.Mutation):
+    """Ping a sensor to check its health status."""
+    class Arguments:
+        sensor_id = graphene.Int(required=True)
+
+    Output = PingSensorResult
+
+    @staticmethod
+    def mutate(root: Any, info: Any, sensor_id: int) -> 'PingSensorResult':
+        """Ping a sensor and return its health status."""
+        import time
+
+        sensor = Sensor.query.get(sensor_id)
+        if not sensor:
+            return PingSensorResult(
+                success=False,
+                message=f"Sensor with ID {sensor_id} not found",
+                sensor_id=sensor_id
+            )
+
+        if not sensor.ip_address:
+            return PingSensorResult(
+                success=False,
+                message=f"Sensor {sensor.name} has no IP address configured",
+                sensor_id=sensor_id
+            )
+
+        # Build health check URL
+        port = sensor.health_check_port or 8080
+        health_url = f"http://{sensor.ip_address}:{port}/health"
+
+        start_time = time.time()
+
+        try:
+            response = requests.get(health_url, timeout=10)
+            ping_time_ms = int((time.time() - start_time) * 1000)
+
+            if response.status_code == 200:
+                health_data = response.json()
+
+                # Store health report
+                report = SensorHealthReport(
+                    sensor_id=sensor_id,
+                    service_running=health_data.get('service_running'),
+                    service_uptime_seconds=health_data.get('service_uptime_seconds'),
+                    sensor_connected=health_data.get('sensor_connected'),
+                    sensor_data_ready=health_data.get('sensor_data_ready'),
+                    sensor_serial_number=health_data.get('sensor_serial_number'),
+                    last_co2_ppm=health_data.get('last_co2_ppm'),
+                    last_temperature_celsius=health_data.get('last_temperature_celsius'),
+                    last_humidity_percentage=health_data.get('last_humidity_percentage'),
+                    last_reading_time=datetime.fromisoformat(health_data['last_reading_time']) if health_data.get('last_reading_time') else None,
+                    system_uptime_seconds=health_data.get('system_uptime_seconds'),
+                    disk_usage_percent=health_data.get('disk_usage_percent'),
+                    memory_usage_percent=health_data.get('memory_usage_percent'),
+                    cpu_temperature_celsius=health_data.get('cpu_temperature_celsius'),
+                    api_reachable=health_data.get('api_reachable'),
+                    api_response_time_ms=health_data.get('api_response_time_ms'),
+                    consecutive_failures=health_data.get('consecutive_failures')
+                )
+                db.session.add(report)
+
+                # Update sensor health check timestamp
+                sensor.last_health_check = datetime.utcnow()
+                sensor.last_health_status = 'healthy' if health_data.get('sensor_connected') else 'degraded'
+                db.session.commit()
+
+                return PingSensorResult(
+                    success=True,
+                    message="Sensor is reachable and responding",
+                    sensor_id=sensor_id,
+                    service_running=health_data.get('service_running'),
+                    service_uptime_seconds=health_data.get('service_uptime_seconds'),
+                    sensor_connected=health_data.get('sensor_connected'),
+                    sensor_data_ready=health_data.get('sensor_data_ready'),
+                    sensor_serial_number=health_data.get('sensor_serial_number'),
+                    last_co2_ppm=health_data.get('last_co2_ppm'),
+                    last_temperature_celsius=health_data.get('last_temperature_celsius'),
+                    last_humidity_percentage=health_data.get('last_humidity_percentage'),
+                    last_reading_time=datetime.fromisoformat(health_data['last_reading_time']) if health_data.get('last_reading_time') else None,
+                    system_uptime_seconds=health_data.get('system_uptime_seconds'),
+                    disk_usage_percent=health_data.get('disk_usage_percent'),
+                    memory_usage_percent=health_data.get('memory_usage_percent'),
+                    cpu_temperature_celsius=health_data.get('cpu_temperature_celsius'),
+                    api_reachable=health_data.get('api_reachable'),
+                    api_response_time_ms=health_data.get('api_response_time_ms'),
+                    consecutive_failures=health_data.get('consecutive_failures'),
+                    ping_response_time_ms=ping_time_ms
+                )
+            else:
+                # Sensor reachable but returned error
+                sensor.last_health_check = datetime.utcnow()
+                sensor.last_health_status = 'degraded'
+                db.session.commit()
+
+                return PingSensorResult(
+                    success=False,
+                    message=f"Sensor responded with status {response.status_code}",
+                    sensor_id=sensor_id,
+                    error_message=response.text[:500] if response.text else None,
+                    ping_response_time_ms=ping_time_ms
+                )
+
+        except requests.exceptions.Timeout:
+            sensor.last_health_check = datetime.utcnow()
+            sensor.last_health_status = 'offline'
+            db.session.commit()
+
+            return PingSensorResult(
+                success=False,
+                message="Sensor did not respond within 10 seconds",
+                sensor_id=sensor_id,
+                error_message="Connection timeout"
+            )
+
+        except requests.exceptions.ConnectionError as e:
+            sensor.last_health_check = datetime.utcnow()
+            sensor.last_health_status = 'offline'
+            db.session.commit()
+
+            return PingSensorResult(
+                success=False,
+                message="Could not connect to sensor",
+                sensor_id=sensor_id,
+                error_message=str(e)
+            )
+
+        except Exception as e:
+            logger.error(f"Error pinging sensor {sensor_id}: {e}", exc_info=True)
+            return PingSensorResult(
+                success=False,
+                message="Error while pinging sensor",
+                sensor_id=sensor_id,
+                error_message=str(e)
+            )
+
+
+class UpdateSensorNetwork(graphene.Mutation):
+    """Update sensor network configuration for health checks."""
+    class Arguments:
+        sensor_id = graphene.Int(required=True)
+        ip_address = graphene.String()
+        health_check_port = graphene.Int()
+
+    success = graphene.Boolean()
+    message = graphene.String()
+    sensor = graphene.Field(SensorObject)
+
+    @staticmethod
+    def mutate(root: Any, info: Any, sensor_id: int, ip_address: str = None, health_check_port: int = None):
+        sensor = Sensor.query.get(sensor_id)
+        if not sensor:
+            return UpdateSensorNetwork(
+                success=False,
+                message=f"Sensor with ID {sensor_id} not found"
+            )
+
+        if ip_address is not None:
+            sensor.ip_address = ip_address
+        if health_check_port is not None:
+            sensor.health_check_port = health_check_port
+
+        db.session.commit()
+
+        return UpdateSensorNetwork(
+            success=True,
+            message="Sensor network configuration updated",
+            sensor=sensor
+        )
+
+
+# ---- Alert System Types, Inputs, and Mutations ----
+
+class AlertThresholdObject(SQLAlchemyObjectType):
+    """GraphQL type for alert threshold configuration."""
+    class Meta:
+        model = AlertThreshold
+
+    sensor = graphene.Field(lambda: SensorObject)
+
+    def resolve_sensor(self, info: Any):
+        if self.sensor_id:
+            return Sensor.query.get(self.sensor_id)
+        return None
+
+
+class AlertHistoryObject(SQLAlchemyObjectType):
+    """GraphQL type for alert history entries."""
+    class Meta:
+        model = AlertHistory
+
+    sensor = graphene.Field(lambda: SensorObject)
+
+    def resolve_sensor(self, info: Any):
+        return Sensor.query.get(self.sensor_id)
+
+
+class UpsertAlertThresholdInput(graphene.InputObjectType):
+    """Input for creating or updating an alert threshold."""
+    sensor_id = graphene.Int(description="Sensor ID, or omit for global default")
+    warning_ppm = graphene.Int(default_value=1000)
+    critical_ppm = graphene.Int(default_value=1500)
+    cooldown_minutes = graphene.Int(default_value=30)
+    email_enabled = graphene.Boolean(default_value=True)
+    browser_enabled = graphene.Boolean(default_value=True)
+    ntfy_enabled = graphene.Boolean(default_value=False)
+    ntfy_topic = graphene.String()
+    ntfy_server = graphene.String()
+    is_enabled = graphene.Boolean(default_value=True)
+
+
+class UpsertAlertThreshold(graphene.Mutation):
+    """Create or update an alert threshold for the current user."""
+    class Arguments:
+        input = UpsertAlertThresholdInput(required=True)
+
+    success = graphene.Boolean()
+    message = graphene.String()
+    errors = graphene.List(graphene.String)
+    alert_threshold = graphene.Field(AlertThresholdObject)
+
+    @staticmethod
+    @require_user
+    def mutate(root: Any, info: Any, input: UpsertAlertThresholdInput) -> 'UpsertAlertThreshold':
+        user = get_user_from_context(info)
+        if not user:
+            return UpsertAlertThreshold(success=False, message="Authentication required", errors=["Not authenticated"])
+
+        # Validate PPM values
+        if input.warning_ppm < 0 or input.critical_ppm < 0:
+            return UpsertAlertThreshold(success=False, message="PPM values must be positive", errors=["Invalid PPM"])
+        if input.warning_ppm >= input.critical_ppm:
+            return UpsertAlertThreshold(success=False, message="Warning PPM must be less than critical PPM", errors=["warning_ppm must be < critical_ppm"])
+        if input.cooldown_minutes < 1:
+            return UpsertAlertThreshold(success=False, message="Cooldown must be at least 1 minute", errors=["Invalid cooldown"])
+
+        try:
+            threshold = AlertThreshold.query.filter_by(
+                user_id=user.id, sensor_id=input.sensor_id
+            ).first()
+
+            if threshold:
+                threshold.warning_ppm = input.warning_ppm
+                threshold.critical_ppm = input.critical_ppm
+                threshold.cooldown_minutes = input.cooldown_minutes
+                threshold.email_enabled = input.email_enabled
+                threshold.browser_enabled = input.browser_enabled
+                threshold.ntfy_enabled = input.ntfy_enabled
+                threshold.ntfy_topic = input.ntfy_topic
+                threshold.ntfy_server = input.ntfy_server or 'https://ntfy.sh'
+                threshold.is_enabled = input.is_enabled
+            else:
+                threshold = AlertThreshold(
+                    user_id=user.id,
+                    sensor_id=input.sensor_id,
+                    warning_ppm=input.warning_ppm,
+                    critical_ppm=input.critical_ppm,
+                    cooldown_minutes=input.cooldown_minutes,
+                    email_enabled=input.email_enabled,
+                    browser_enabled=input.browser_enabled,
+                    ntfy_enabled=input.ntfy_enabled,
+                    ntfy_topic=input.ntfy_topic,
+                    ntfy_server=input.ntfy_server or 'https://ntfy.sh',
+                    is_enabled=input.is_enabled,
+                )
+                db.session.add(threshold)
+
+            db.session.commit()
+
+            logger.info(
+                "Alert threshold upserted",
+                extra={'extra_context': {
+                    'user_id': user.id,
+                    'sensor_id': input.sensor_id,
+                    'threshold_id': threshold.id,
+                    'operation': 'upsert_alert_threshold_success',
+                }}
+            )
+            return UpsertAlertThreshold(success=True, message="Alert threshold saved", errors=[], alert_threshold=threshold)
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error("Failed to upsert alert threshold", exc_info=True,
+                         extra={'extra_context': {'user_id': user.id, 'operation': 'upsert_alert_threshold_error'}})
+            return UpsertAlertThreshold(success=False, message="Failed to save alert threshold", errors=["Database error"])
+
+
+class DeleteAlertThreshold(graphene.Mutation):
+    """Delete an alert threshold owned by the current user."""
+    class Arguments:
+        id = graphene.ID(required=True)
+
+    success = graphene.Boolean()
+    message = graphene.String()
+
+    @staticmethod
+    @require_user
+    def mutate(root: Any, info: Any, id: str) -> 'DeleteAlertThreshold':
+        user = get_user_from_context(info)
+        if not user:
+            return DeleteAlertThreshold(success=False, message="Authentication required")
+
+        threshold = AlertThreshold.query.get(int(id))
+        if not threshold or threshold.user_id != user.id:
+            return DeleteAlertThreshold(success=False, message="Threshold not found")
+
+        db.session.delete(threshold)
+        db.session.commit()
+
+        logger.info("Alert threshold deleted",
+                     extra={'extra_context': {'threshold_id': id, 'user_id': user.id, 'operation': 'delete_alert_threshold'}})
+        return DeleteAlertThreshold(success=True, message="Alert threshold deleted")
+
+
+class AcknowledgeAlert(graphene.Mutation):
+    """Acknowledge a single alert."""
+    class Arguments:
+        id = graphene.ID(required=True)
+
+    success = graphene.Boolean()
+    message = graphene.String()
+
+    @staticmethod
+    @require_user
+    def mutate(root: Any, info: Any, id: str) -> 'AcknowledgeAlert':
+        user = get_user_from_context(info)
+        if not user:
+            return AcknowledgeAlert(success=False, message="Authentication required")
+
+        alert = AlertHistory.query.get(int(id))
+        if not alert or alert.user_id != user.id:
+            return AcknowledgeAlert(success=False, message="Alert not found")
+
+        alert.acknowledged = True
+        alert.acknowledged_at = datetime.utcnow()
+        db.session.commit()
+
+        return AcknowledgeAlert(success=True, message="Alert acknowledged")
+
+
+class AcknowledgeAllAlerts(graphene.Mutation):
+    """Acknowledge all unacknowledged alerts for the current user."""
+    class Arguments:
+        pass
+
+    success = graphene.Boolean()
+    message = graphene.String()
+    count = graphene.Int()
+
+    @staticmethod
+    @require_user
+    def mutate(root: Any, info: Any) -> 'AcknowledgeAllAlerts':
+        user = get_user_from_context(info)
+        if not user:
+            return AcknowledgeAllAlerts(success=False, message="Authentication required", count=0)
+
+        now = datetime.utcnow()
+        count = AlertHistory.query.filter_by(
+            user_id=user.id, acknowledged=False
+        ).update({'acknowledged': True, 'acknowledged_at': now})
+        db.session.commit()
+
+        logger.info("All alerts acknowledged",
+                     extra={'extra_context': {'user_id': user.id, 'count': count, 'operation': 'acknowledge_all_alerts'}})
+        return AcknowledgeAllAlerts(success=True, message=f"{count} alerts acknowledged", count=count)
+
+
 class Mutation(graphene.ObjectType):
     create_sensor_reading = CreateSensorReading.Field()
     register_user = RegisterUser.Field()
@@ -1235,6 +3133,39 @@ class Mutation(graphene.ObjectType):
     create_ring_snapshot = CreateRingSnapshot.Field()
     capture_ring_snapshot = CaptureRingSnapshot.Field()
     batch_update_ring_devices = BatchUpdateRingDevices.Field()
+
+    # Location Management
+    create_location = CreateLocation.Field()
+    update_location = UpdateLocation.Field()
+    delete_location = DeleteLocation.Field()
+
+    # Sensor Management
+    create_sensor = CreateSensor.Field()
+    update_sensor = UpdateSensor.Field()
+    delete_sensor = DeleteSensor.Field()
+    toggle_sensor_active = ToggleSensorActive.Field()
+
+    # Sensor Health Monitoring
+    ping_sensor = PingSensor.Field()
+    update_sensor_network = UpdateSensorNetwork.Field()
+
+    # Sensor-Location Assignment
+    assign_sensor_to_location = AssignSensorToLocation.Field()
+    move_sensor_to_location = MoveSensorToLocation.Field()
+    remove_sensor_from_location = RemoveSensorFromLocation.Field()
+
+    # Dashboard Layouts
+    create_dashboard_layout = CreateDashboardLayout.Field()
+    update_dashboard_layout = UpdateDashboardLayout.Field()
+    delete_dashboard_layout = DeleteDashboardLayout.Field()
+    set_last_used_layout = SetLastUsedLayout.Field()
+    duplicate_dashboard_layout = DuplicateDashboardLayout.Field()
+
+    # Alert System
+    upsert_alert_threshold = UpsertAlertThreshold.Field()
+    delete_alert_threshold = DeleteAlertThreshold.Field()
+    acknowledge_alert = AcknowledgeAlert.Field()
+    acknowledge_all_alerts = AcknowledgeAllAlerts.Field()
 
 class Query(graphene.ObjectType):
     sensors = graphene.List(SensorObject)
@@ -1283,6 +3214,43 @@ class Query(graphene.ObjectType):
     sensor = graphene.Field(SensorObject, id=graphene.Int(required=True))
     location = graphene.Field(LocationObject, id=graphene.Int(required=True))
     user = graphene.Field(UserObject, id=graphene.Int(required=True))
+
+    # Dashboard layout queries
+    dashboard_layouts = graphene.List(DashboardLayoutObject)
+    dashboard_layout = graphene.Field(DashboardLayoutObject, id=graphene.ID(required=True))
+    last_used_dashboard_layout = graphene.Field(DashboardLayoutObject)
+
+    # Sensor health monitoring queries
+    sensor_health = graphene.Field(
+        SensorHealthObject,
+        sensor_id=graphene.Int(required=True),
+        description="Get health status for a specific sensor"
+    )
+    all_sensor_health = graphene.List(
+        SensorHealthObject,
+        description="Get health status for all sensors"
+    )
+    sensor_health_reports = graphene.List(
+        SensorHealthReportObject,
+        sensor_id=graphene.Int(required=True),
+        limit=graphene.Int(default_value=10),
+        description="Get recent health reports for a sensor"
+    )
+
+    # Alert system queries
+    alert_thresholds = graphene.List(
+        AlertThresholdObject,
+        description="Get current user's alert thresholds"
+    )
+    alert_history = graphene.List(
+        AlertHistoryObject,
+        limit=graphene.Int(default_value=50),
+        offset=graphene.Int(default_value=0),
+        description="Get paginated alert history for current user"
+    )
+    unacknowledged_alert_count = graphene.Int(
+        description="Count of unacknowledged alerts for current user"
+    )
 
     def resolve_sensors(self, info: Any) -> List[Sensor]:
         """Get all sensors with optimized loading.
@@ -1358,6 +3326,38 @@ class Query(graphene.ObjectType):
     def resolve_user(self, info: Any, id: int) -> Optional[User]:
         """Get user by ID (admin only)."""
         return User.query.get(id)
+
+    @require_user
+    def resolve_dashboard_layouts(self, info: Any) -> List[DashboardLayout]:
+        """Get all dashboard layouts for the authenticated user."""
+        user = get_user_from_context(info)
+        if not user:
+            return []
+        return DashboardLayout.query.filter_by(
+            user_id=user.id
+        ).order_by(desc(DashboardLayout.updated_at)).all()
+
+    @require_user
+    def resolve_dashboard_layout(self, info: Any, id: str) -> Optional[DashboardLayout]:
+        """Get a specific dashboard layout by ID."""
+        user = get_user_from_context(info)
+        if not user:
+            return None
+        return DashboardLayout.query.filter_by(
+            id=int(id),
+            user_id=user.id
+        ).first()
+
+    @require_user
+    def resolve_last_used_dashboard_layout(self, info: Any) -> Optional[DashboardLayout]:
+        """Get the last used dashboard layout for the authenticated user."""
+        user = get_user_from_context(info)
+        if not user:
+            return None
+        return DashboardLayout.query.filter_by(
+            user_id=user.id,
+            is_last_used=True
+        ).first()
 
     def resolve_cameras(self, info: Any) -> List[Camera]:
         """Get all cameras."""
@@ -1744,18 +3744,23 @@ class Query(graphene.ObjectType):
 
     filtered_sensor_readings = graphene.List(SensorReadingObject, filters=SensorDataFilterInput(required=True))
 
+    @cached_query(ttl=60)  # Cache for 60 seconds - sensor data updates every ~10 minutes
     def resolve_filtered_sensor_readings(self, info: Any, filters: SensorDataFilterInput) -> List[SensorReadingModel]:
         """Get sensor readings filtered by various criteria.
-        
+
         Supports filtering by date range, measurement values, sensors, locations,
         with pagination and ordering. Uses optimized queries to prevent N+1 issues.
+        Results are cached for 60 seconds to improve performance for dashboard widgets.
         """
         # Start with optimized eager loading
+        # Always load measurement readings (lightweight one-to-one joins)
+        # Always load sensor with sensor_locations to prevent N+1 queries in resolve_location
         query = SensorReadingModel.query.options(
-            joinedload(SensorReadingModel.sensor).selectinload(Sensor.sensor_locations).selectinload(SensorLocation.location),
             joinedload(SensorReadingModel.humidity_reading),
             joinedload(SensorReadingModel.temperature_reading),
-            joinedload(SensorReadingModel.co2_reading)
+            joinedload(SensorReadingModel.co2_reading),
+            # Always load sensor_locations to prevent N+1 queries when resolving location
+            joinedload(SensorReadingModel.sensor).selectinload(Sensor.sensor_locations).joinedload(SensorLocation.location)
         )
 
         if filters.start_date:
@@ -1831,19 +3836,106 @@ class Query(graphene.ObjectType):
             order_direction = asc
         
         query = query.order_by(order_direction(order_column))
-        
-        # Apply pagination - default to limit of 100 if not specified
-        limit = 100
+
+        # Apply pagination - only apply limit if explicitly specified
+        # Charts need all data points within their time range, not an arbitrary limit
         if hasattr(filters, 'limit') and filters.limit is not None:
-            limit = filters.limit
-        
-        offset = 0
+            query = query.limit(filters.limit)
+
         if hasattr(filters, 'offset') and filters.offset is not None:
-            offset = filters.offset
-        
-        query = query.limit(limit).offset(offset)
+            query = query.offset(filters.offset)
 
         return query.all()
+
+    def resolve_sensor_health(self, info: Any, sensor_id: int) -> Optional[Dict[str, Any]]:
+        """Get health status for a specific sensor."""
+        sensor = Sensor.query.get(sensor_id)
+        if not sensor:
+            return None
+
+        return _build_sensor_health_object(sensor)
+
+    def resolve_all_sensor_health(self, info: Any) -> List[Dict[str, Any]]:
+        """Get health status for all sensors."""
+        sensors = Sensor.query.all()
+        return [_build_sensor_health_object(sensor) for sensor in sensors]
+
+    def resolve_sensor_health_reports(
+        self, info: Any, sensor_id: int, limit: int = 10
+    ) -> List[SensorHealthReport]:
+        """Get recent health reports for a sensor."""
+        return SensorHealthReport.query.filter_by(
+            sensor_id=sensor_id
+        ).order_by(desc(SensorHealthReport.report_time)).limit(limit).all()
+
+    def resolve_alert_thresholds(self, info: Any) -> List[AlertThreshold]:
+        """Get current user's alert thresholds."""
+        user = get_user_from_context(info)
+        if not user:
+            return []
+        return AlertThreshold.query.filter_by(user_id=user.id).all()
+
+    def resolve_alert_history(self, info: Any, limit: int = 50, offset: int = 0) -> List[AlertHistory]:
+        """Get paginated alert history for current user."""
+        user = get_user_from_context(info)
+        if not user:
+            return []
+        return AlertHistory.query.filter_by(
+            user_id=user.id
+        ).order_by(desc(AlertHistory.created_at)).offset(offset).limit(limit).all()
+
+    def resolve_unacknowledged_alert_count(self, info: Any) -> int:
+        """Count unacknowledged alerts for the current user."""
+        user = get_user_from_context(info)
+        if not user:
+            return 0
+        return AlertHistory.query.filter_by(user_id=user.id, acknowledged=False).count()
+
+
+def _build_sensor_health_object(sensor: Sensor) -> Dict[str, Any]:
+    """Build a SensorHealthObject from a Sensor model."""
+    # Get latest reading for this sensor
+    latest_reading = SensorReadingModel.query.filter_by(
+        sensor_id=sensor.id
+    ).options(
+        joinedload(SensorReadingModel.co2_reading),
+        joinedload(SensorReadingModel.temperature_reading),
+        joinedload(SensorReadingModel.humidity_reading)
+    ).order_by(desc(SensorReadingModel.reading_time)).first()
+
+    # Calculate minutes since last reading
+    minutes_since = None
+    if sensor.last_reading_time:
+        delta = datetime.utcnow() - sensor.last_reading_time
+        minutes_since = int(delta.total_seconds() / 60)
+
+    # Get latest health report
+    latest_report = SensorHealthReport.query.filter_by(
+        sensor_id=sensor.id
+    ).order_by(desc(SensorHealthReport.report_time)).first()
+
+    return {
+        'sensor_id': sensor.id,
+        'sensor_name': sensor.name,
+        'health_status': sensor.health_status,
+        'is_active': sensor.is_active,
+        'last_reading_time': sensor.last_reading_time,
+        'last_successful_reading_time': sensor.last_successful_reading_time,
+        'minutes_since_last_reading': minutes_since,
+        'consecutive_failures': sensor.consecutive_failures or 0,
+        'total_readings': sensor.total_readings or 0,
+        'total_failures': sensor.total_failures or 0,
+        'success_rate': sensor.success_rate,
+        'ip_address': sensor.ip_address,
+        'health_check_port': sensor.health_check_port,
+        'is_reachable': None,  # Will be set by ping
+        'latest_co2_ppm': latest_reading.co2_reading.co2_ppm if latest_reading and latest_reading.co2_reading else None,
+        'latest_temperature_celsius': latest_reading.temperature_reading.temperature_celsius if latest_reading and latest_reading.temperature_reading else None,
+        'latest_humidity_percentage': latest_reading.humidity_reading.humidity_percentage if latest_reading and latest_reading.humidity_reading else None,
+        'last_health_check': sensor.last_health_check,
+        'last_health_report': latest_report,
+    }
+
 
 from app.graphql_security import SecureGraphQLSchema
 
@@ -1858,7 +3950,20 @@ schema = SecureGraphQLSchema(
         PasswordResetRequestInput,
         PasswordResetInput,
         LogoutInput,
-        CreateRingSnapshotInput
+        CreateRingSnapshotInput,
+        # Location Management
+        CreateLocationInput,
+        UpdateLocationInput,
+        # Sensor Management
+        CreateSensorInput,
+        UpdateSensorInput,
+        # Sensor-Location Assignment
+        AssignSensorLocationInput,
+        MoveSensorInput,
+        # Alert System
+        UpsertAlertThresholdInput,
+        AlertThresholdObject,
+        AlertHistoryObject,
     ],
     max_depth=8,
     max_complexity=150,
