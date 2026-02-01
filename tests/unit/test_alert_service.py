@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from app.alert_service import (
     _determine_severity,
     _is_in_cooldown,
+    _send_notifications,
     check_and_send_alerts,
 )
 from app.models import AlertThreshold, AlertCooldown
@@ -93,3 +94,29 @@ class TestCheckAndSendAlerts:
     def test_delegates_to_process_alerts(self, mock_process):
         check_and_send_alerts(sensor_id=5, reading_id=10, co2_ppm=1200)
         mock_process.assert_called_once_with(5, 10, 1200)
+
+
+@pytest.mark.unit
+class TestSendNotifications:
+    """Tests for email status tracking in _send_notifications."""
+
+    @pytest.mark.parametrize(
+        "email_success, expected_email_status, expected_has_email_channel",
+        [
+            (True, "sent", True),
+            (False, "failed", False),
+        ],
+    )
+    @patch("app.alert_service._send_email_alert")
+    def test_email_status_tracking(
+        self, mock_send_email, email_success, expected_email_status, expected_has_email_channel
+    ):
+        mock_send_email.return_value = email_success
+        threshold = MagicMock(spec=AlertThreshold)
+        threshold.user_id = 1
+
+        channels, email_status = _send_notifications(threshold, "Living Room", 1200, "warning")
+
+        assert email_status == expected_email_status
+        assert ("email" in channels) == expected_has_email_channel
+        assert "browser" in channels

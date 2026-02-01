@@ -17,4 +17,9 @@ if __name__ == '__main__':
     else:
         app.logger.info(f"Starting production server on {host}:{port}")
     
-    app.run(host=host, port=port, debug=debug_mode)
+    # Use SocketIO server to handle both HTTP and WebSocket connections
+    socketio = app.extensions.get('socketio')
+    if socketio:
+        socketio.run(app, host=host, port=port, debug=debug_mode)
+    else:
+        app.run(host=host, port=port, debug=debug_mode)

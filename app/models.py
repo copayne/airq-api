@@ -610,15 +610,6 @@ class AlertThreshold(db.Model):
     # Cooldown in minutes between alerts
     cooldown_minutes = db.Column(db.Integer, nullable=False, default=30)
 
-    # Channel toggles
-    email_enabled = db.Column(db.Boolean, nullable=False, default=True)
-    browser_enabled = db.Column(db.Boolean, nullable=False, default=True)
-    ntfy_enabled = db.Column(db.Boolean, nullable=False, default=False)
-
-    # ntfy configuration
-    ntfy_topic = db.Column(db.String(255))
-    ntfy_server = db.Column(db.String(500), default='https://ntfy.sh')
-
     is_enabled = db.Column(db.Boolean, nullable=False, default=True)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -650,6 +641,7 @@ class AlertHistory(db.Model):
     co2_ppm = db.Column(db.Integer, nullable=False)
     severity = db.Column(db.String(20), nullable=False)  # 'warning' or 'critical'
     channels_sent = db.Column(db.String(255), nullable=False)  # comma-separated
+    email_status = db.Column(db.String(20), nullable=False, default='skipped')  # sent, failed, skipped
 
     acknowledged = db.Column(db.Boolean, nullable=False, default=False)
     acknowledged_at = db.Column(db.DateTime)

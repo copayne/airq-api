@@ -118,6 +118,10 @@ def create_app(config_class: Optional[Type[Config]] = None) -> Flask:
             )
             abort(500, description="Failed to serve snapshot image")
 
+    # Initialize WebSocket support
+    from app.events import init_socketio
+    init_socketio(app)
+
     # Log application startup
     if not app.debug:
         app.logger.info('AirQ API startup - GraphQL security enabled with query protection')

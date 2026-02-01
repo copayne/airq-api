@@ -2,12 +2,11 @@
 CO2 threshold alert service.
 
 Checks sensor readings against user-configured thresholds and dispatches
-notifications via email, browser (recorded for polling), and ntfy.sh.
+notifications via email and browser (recorded for polling).
 Alert failures never break reading ingestion.
 """
 
 import logging
-import requests as http_requests
 from datetime import datetime, timedelta
 from typing import List, Optional
 
@@ -76,7 +75,7 @@ def _process_alerts(sensor_id: int, reading_id: int, co2_ppm: int) -> None:
         if _is_in_cooldown(threshold.user_id, sensor_id, threshold.cooldown_minutes, severity):
             continue
 
-        channels = _send_notifications(threshold, location_label, co2_ppm, severity)
+        channels, email_status = _send_notifications(threshold, location_label, co2_ppm, severity)
         if not channels:
             continue
 
@@ -89,11 +88,32 @@ def _process_alerts(sensor_id: int, reading_id: int, co2_ppm: int) -> None:
             co2_ppm=co2_ppm,
             severity=severity,
             channels_sent=','.join(channels),
+            email_status=email_status,
         )
         db.session.add(alert)
 
         # Upsert cooldown
         _upsert_cooldown(threshold.user_id, sensor_id, severity)
+
+        # Publish real-time WebSocket alert event
+        try:
+            from app.events import publish_alert
+            publish_alert(threshold.user_id, {
+                'sensor_id': sensor_id,
+                'reading_id': reading_id,
+                'co2_ppm': co2_ppm,
+                'severity': severity,
+                'location': location_label,
+            })
+        except Exception:
+            logger.error(
+                "WebSocket alert publish failed",
+                exc_info=True,
+                extra={'extra_context': {
+                    'user_id': threshold.user_id,
+                    'operation': 'ws_publish_alert_error',
+                }}
+            )
 
     db.session.commit()
 
@@ -158,24 +178,20 @@ def _send_notifications(
     location_label: str,
     co2_ppm: int,
     severity: str,
-) -> List[str]:
-    """Send alerts via all enabled channels. Returns list of channels sent."""
+) -> tuple:
+    """Send email and record browser alert. Returns (channels, email_status)."""
     channels: List[str] = []
+    email_sent = _send_email_alert(threshold.user_id, location_label, co2_ppm, severity)
+    if email_sent:
+        channels.append('email')
+        email_status = 'sent'
+    else:
+        email_status = 'failed'
 
-    if threshold.email_enabled:
-        if _send_email_alert(threshold.user_id, location_label, co2_ppm, severity):
-            channels.append('email')
+    # Browser alerts are recorded in alert_history for frontend polling.
+    channels.append('browser')
 
-    if threshold.browser_enabled:
-        # Browser alerts are recorded in alert_history for frontend polling.
-        # No server push needed.
-        channels.append('browser')
-
-    if threshold.ntfy_enabled and threshold.ntfy_topic:
-        if _send_ntfy_alert(threshold, location_label, co2_ppm, severity):
-            channels.append('ntfy')
-
-    return channels
+    return channels, email_status
 
 
 def _send_email_alert(
@@ -205,58 +221,6 @@ def _send_email_alert(
                 'location_label': location_label,
                 'co2_ppm': co2_ppm,
                 'operation': 'send_email_alert_error',
-            }}
-        )
-        return False
-
-
-def _send_ntfy_alert(
-    threshold: AlertThreshold,
-    location_label: str,
-    co2_ppm: int,
-    severity: str,
-) -> bool:
-    """Send CO2 alert via ntfy.sh push notification."""
-    try:
-        server = (threshold.ntfy_server or 'https://ntfy.sh').rstrip('/')
-        url = f"{server}/{threshold.ntfy_topic}"
-
-        title = f"AirQ CO2 Alert - {severity.upper()}"
-        body = f"{location_label}: CO2 at {co2_ppm} ppm ({severity})"
-        priority = '5' if severity == 'critical' else '3'
-
-        response = http_requests.post(
-            url,
-            data=body.encode('utf-8'),
-            headers={
-                'Title': title,
-                'Priority': priority,
-                'Tags': 'warning' if severity == 'warning' else 'rotating_light',
-            },
-            timeout=10,
-        )
-        response.raise_for_status()
-
-        logger.info(
-            "ntfy alert sent",
-            extra={'extra_context': {
-                'user_id': threshold.user_id,
-                'location_label': location_label,
-                'co2_ppm': co2_ppm,
-                'severity': severity,
-                'operation': 'send_ntfy_alert_success',
-            }}
-        )
-        return True
-
-    except Exception:
-        logger.error(
-            "Failed to send ntfy alert",
-            exc_info=True,
-            extra={'extra_context': {
-                'user_id': threshold.user_id,
-                'ntfy_topic': threshold.ntfy_topic,
-                'operation': 'send_ntfy_alert_error',
             }}
         )
         return False

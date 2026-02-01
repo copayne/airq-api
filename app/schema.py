@@ -330,6 +330,28 @@ class CreateSensorReading(graphene.Mutation):
 
             db.session.commit()
 
+            # Publish real-time WebSocket event (failures never break ingestion)
+            try:
+                from app.events import publish_sensor_reading
+                publish_sensor_reading({
+                    'reading_id': sensor_reading.id,
+                    'sensor_id': input.sensor_id,
+                    'humidity_percentage': input.humidity_percentage,
+                    'temperature_celsius': input.temperature_celsius,
+                    'co2_ppm': input.co2_ppm,
+                    'timestamp': str(sensor_reading.timestamp),
+                })
+            except Exception:
+                logger.error(
+                    "WebSocket publish failed after sensor reading commit",
+                    exc_info=True,
+                    extra={'extra_context': {
+                        'sensor_id': input.sensor_id,
+                        'reading_id': sensor_reading.id,
+                        'operation': 'ws_publish_reading_error',
+                    }}
+                )
+
             # Check CO2 thresholds and send alerts (failures never break ingestion)
             if input.co2_ppm is not None:
                 try:
@@ -965,6 +987,133 @@ class ResetPassword(graphene.Mutation):
                 success=False,
                 message="Password reset failed. Please try again."
             )
+
+
+class UpdateProfileInput(graphene.InputObjectType):
+    """Input for updating user profile."""
+    first_name = graphene.String()
+    last_name = graphene.String()
+    email = graphene.String()
+
+
+class UpdateProfile(graphene.Mutation):
+    """Update authenticated user's profile."""
+    class Arguments:
+        input = UpdateProfileInput(required=True)
+
+    Output = AuthPayload
+
+    @staticmethod
+    @require_user
+    def mutate(root: Any, info: Any, input: UpdateProfileInput) -> AuthPayload:
+        """Update the current user's profile fields."""
+        from app.validation import UserInputValidator
+
+        try:
+            user = get_user_from_context(info.context)
+            if not user:
+                return AuthPayload(success=False, message="Authentication required")
+
+            validator = UserInputValidator()
+
+            if input.email is not None:
+                email = input.email.strip().lower()
+                if not email:
+                    return AuthPayload(success=False, message="Email cannot be empty")
+                validation_result = validator.validate_registration_input(
+                    username=user.username,
+                    email=email,
+                    password="DummyPass1!"  # Not validating password here
+                )
+                # Check only email-related errors
+                existing = User.query.filter(User.email == email, User.id != user.id).first()
+                if existing:
+                    return AuthPayload(success=False, message="Email already registered")
+                if user.email != email:
+                    user.email = email
+                    user.email_verified = False
+
+            if input.first_name is not None:
+                name = input.first_name.strip()
+                if len(name) > 100:
+                    return AuthPayload(success=False, message="First name must be no more than 100 characters")
+                user.first_name = name or None
+
+            if input.last_name is not None:
+                name = input.last_name.strip()
+                if len(name) > 100:
+                    return AuthPayload(success=False, message="Last name must be no more than 100 characters")
+                user.last_name = name or None
+
+            db.session.commit()
+
+            logger.info(
+                f"Profile updated for user: {user.username}",
+                extra={'extra_context': {'user_id': user.id, 'operation': 'update_profile'}}
+            )
+
+            return AuthPayload(success=True, message="Profile updated successfully", user=user)
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Profile update failed: {str(e)}")
+            return AuthPayload(success=False, message="Profile update failed. Please try again.")
+
+
+class ChangePasswordInput(graphene.InputObjectType):
+    """Input for changing password."""
+    current_password = graphene.String(required=True)
+    new_password = graphene.String(required=True)
+
+
+class ChangePassword(graphene.Mutation):
+    """Change authenticated user's password."""
+    class Arguments:
+        input = ChangePasswordInput(required=True)
+
+    success = graphene.Boolean()
+    message = graphene.String()
+
+    @staticmethod
+    @require_user
+    def mutate(root: Any, info: Any, input: ChangePasswordInput) -> 'ChangePassword':
+        """Change the current user's password."""
+        from app.validation import UserInputValidator
+
+        try:
+            user = get_user_from_context(info.context)
+            if not user:
+                return ChangePassword(success=False, message="Authentication required")
+
+            if not user.check_password(input.current_password):
+                return ChangePassword(success=False, message="Current password is incorrect")
+
+            validator = UserInputValidator()
+            validation_result = validator.validate_registration_input(
+                username=user.username,
+                email=user.email,
+                password=input.new_password
+            )
+            if not validation_result.is_valid:
+                password_errors = [e.message for e in validation_result.errors if 'password' in e.field.lower()]
+                if password_errors:
+                    return ChangePassword(success=False, message=password_errors[0])
+                return ChangePassword(success=False, message="New password does not meet requirements")
+
+            user.set_password(input.new_password)
+            db.session.commit()
+
+            logger.info(
+                f"Password changed for user: {user.username}",
+                extra={'extra_context': {'user_id': user.id, 'operation': 'change_password'}}
+            )
+
+            return ChangePassword(success=True, message="Password changed successfully")
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Password change failed: {str(e)}")
+            return ChangePassword(success=False, message="Password change failed. Please try again.")
 
 
 class LogoutUser(graphene.Mutation):
@@ -2958,11 +3107,6 @@ class UpsertAlertThresholdInput(graphene.InputObjectType):
     warning_ppm = graphene.Int(default_value=1000)
     critical_ppm = graphene.Int(default_value=1500)
     cooldown_minutes = graphene.Int(default_value=30)
-    email_enabled = graphene.Boolean(default_value=True)
-    browser_enabled = graphene.Boolean(default_value=True)
-    ntfy_enabled = graphene.Boolean(default_value=False)
-    ntfy_topic = graphene.String()
-    ntfy_server = graphene.String()
     is_enabled = graphene.Boolean(default_value=True)
 
 
@@ -3000,11 +3144,6 @@ class UpsertAlertThreshold(graphene.Mutation):
                 threshold.warning_ppm = input.warning_ppm
                 threshold.critical_ppm = input.critical_ppm
                 threshold.cooldown_minutes = input.cooldown_minutes
-                threshold.email_enabled = input.email_enabled
-                threshold.browser_enabled = input.browser_enabled
-                threshold.ntfy_enabled = input.ntfy_enabled
-                threshold.ntfy_topic = input.ntfy_topic
-                threshold.ntfy_server = input.ntfy_server or 'https://ntfy.sh'
                 threshold.is_enabled = input.is_enabled
             else:
                 threshold = AlertThreshold(
@@ -3013,11 +3152,6 @@ class UpsertAlertThreshold(graphene.Mutation):
                     warning_ppm=input.warning_ppm,
                     critical_ppm=input.critical_ppm,
                     cooldown_minutes=input.cooldown_minutes,
-                    email_enabled=input.email_enabled,
-                    browser_enabled=input.browser_enabled,
-                    ntfy_enabled=input.ntfy_enabled,
-                    ntfy_topic=input.ntfy_topic,
-                    ntfy_server=input.ntfy_server or 'https://ntfy.sh',
                     is_enabled=input.is_enabled,
                 )
                 db.session.add(threshold)
@@ -3122,6 +3256,39 @@ class AcknowledgeAllAlerts(graphene.Mutation):
         return AcknowledgeAllAlerts(success=True, message=f"{count} alerts acknowledged", count=count)
 
 
+class SendTestAlert(graphene.Mutation):
+    """Send a test alert email to verify delivery works."""
+    class Arguments:
+        pass
+
+    success = graphene.Boolean()
+    message = graphene.String()
+
+    @staticmethod
+    @require_user
+    def mutate(root: Any, info: Any) -> 'SendTestAlert':
+        user = get_user_from_context(info)
+        if not user:
+            return SendTestAlert(success=False, message="Authentication required")
+
+        try:
+            from app.email_service import email_service
+            sent = email_service.send_co2_alert(
+                user_email=user.email,
+                username=user.username,
+                location_label="Test Location",
+                co2_ppm=9999,
+                severity="warning",
+            )
+            if sent:
+                return SendTestAlert(success=True, message="Test alert email sent")
+            return SendTestAlert(success=False, message="Failed to send test alert email")
+        except Exception:
+            logger.error("SendTestAlert failed", exc_info=True,
+                         extra={'extra_context': {'user_id': user.id, 'operation': 'send_test_alert_error'}})
+            return SendTestAlert(success=False, message="Failed to send test alert email")
+
+
 class Mutation(graphene.ObjectType):
     create_sensor_reading = CreateSensorReading.Field()
     register_user = RegisterUser.Field()
@@ -3130,6 +3297,8 @@ class Mutation(graphene.ObjectType):
     request_password_reset = RequestPasswordReset.Field()
     reset_password = ResetPassword.Field()
     logout_user = LogoutUser.Field()
+    update_profile = UpdateProfile.Field()
+    change_password = ChangePassword.Field()
     create_ring_snapshot = CreateRingSnapshot.Field()
     capture_ring_snapshot = CaptureRingSnapshot.Field()
     batch_update_ring_devices = BatchUpdateRingDevices.Field()
@@ -3166,6 +3335,7 @@ class Mutation(graphene.ObjectType):
     delete_alert_threshold = DeleteAlertThreshold.Field()
     acknowledge_alert = AcknowledgeAlert.Field()
     acknowledge_all_alerts = AcknowledgeAllAlerts.Field()
+    send_test_alert = SendTestAlert.Field()
 
 class Query(graphene.ObjectType):
     sensors = graphene.List(SensorObject)

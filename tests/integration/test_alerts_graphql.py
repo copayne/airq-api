@@ -1,6 +1,7 @@
 """Integration tests for alert system GraphQL operations."""
 
 import pytest
+from unittest.mock import patch
 from app.models import User, Sensor, AlertThreshold, AlertHistory, SensorReading
 
 
@@ -60,9 +61,6 @@ class TestAlertThresholdMutations:
                     warningPpm
                     criticalPpm
                     cooldownMinutes
-                    emailEnabled
-                    browserEnabled
-                    ntfyEnabled
                     isEnabled
                 }
             }
@@ -73,9 +71,6 @@ class TestAlertThresholdMutations:
                 "warningPpm": 800,
                 "criticalPpm": 1200,
                 "cooldownMinutes": 15,
-                "emailEnabled": True,
-                "browserEnabled": True,
-                "ntfyEnabled": False,
             }
         })
         data = result.get("data", {}).get("upsertAlertThreshold", {})
@@ -191,6 +186,41 @@ class TestAlertQueries:
         result = auth_graphql_executor(query)
         count = result.get("data", {}).get("unacknowledgedAlertCount", 0)
         assert count >= 1
+
+
+@pytest.mark.integration
+class TestSendTestAlert:
+    """Tests for the send test alert mutation."""
+
+    @patch("app.email_service.email_service.send_co2_alert", return_value=True)
+    def test_send_test_alert_success(self, mock_send, auth_graphql_executor):
+        mutation = """
+        mutation {
+            sendTestAlert {
+                success
+                message
+            }
+        }
+        """
+        result = auth_graphql_executor(mutation)
+        data = result.get("data", {}).get("sendTestAlert", {})
+        assert data["success"] is True
+        assert "sent" in data["message"].lower()
+        mock_send.assert_called_once()
+
+    @patch("app.email_service.email_service.send_co2_alert", return_value=False)
+    def test_send_test_alert_failure(self, mock_send, auth_graphql_executor):
+        mutation = """
+        mutation {
+            sendTestAlert {
+                success
+                message
+            }
+        }
+        """
+        result = auth_graphql_executor(mutation)
+        data = result.get("data", {}).get("sendTestAlert", {})
+        assert data["success"] is False
 
 
 @pytest.mark.integration

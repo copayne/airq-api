@@ -127,35 +127,21 @@ class EmailService:
         severity_upper = severity.upper()
         color = '#FF0000' if severity == 'critical' else '#FFA500'
 
-        subject = f"AirQ - CO2 {severity_upper} Alert: {co2_ppm} ppm at {location_label}"
+        subject = f"CO2 {severity_upper}: {co2_ppm}ppm - {location_label}"
 
         html_body = f"""
         <html>
-        <body>
-            <h2 style="color: {color};">CO2 {severity_upper} Alert</h2>
-            <p>Hi {username},</p>
-            <p><strong>{location_label}</strong> has a CO2 level of
-            <strong style="color: {color};">{co2_ppm} ppm</strong> ({severity}).</p>
-            <p>Consider ventilating the area to improve air quality.</p>
-            <p><a href="{self.base_url}/dash" style="background-color: {color}; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px;">View Dashboard</a></p>
-            <p>Best regards,<br>The AirQ Team</p>
-        </body>
         </html>
         """
 
         text_body = f"""
-        CO2 {severity_upper} Alert
+        CO2 {severity_upper}
 
-        Hi {username},
-
-        {location_label} has a CO2 level of {co2_ppm} ppm ({severity}).
+        {location_label} has a CO2 level of {co2_ppm} ppm.
 
         Consider ventilating the area to improve air quality.
 
-        View your dashboard: {self.base_url}/dash
-
-        Best regards,
-        The AirQ Team
+        View dashboard: {self.base_url}/dash
         """
 
         return self._send_email(user_email, subject, text_body, html_body)
@@ -194,7 +180,7 @@ class EmailService:
             # Create message
             msg = MIMEMultipart('alternative')
             msg['Subject'] = subject
-            msg['From'] = self.from_email
+            msg['From'] = f'AirQ <{self.from_email}>'
             msg['To'] = to_email
             
             # Create text and HTML parts

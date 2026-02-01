@@ -53,6 +53,9 @@ class Config:
     MOCK_EMAIL = os.getenv('MOCK_EMAIL', 'true').lower() == 'true'
     SAVE_MOCK_EMAILS = os.getenv('SAVE_MOCK_EMAILS', 'false').lower() == 'true'
 
+    # WebSocket Configuration
+    SOCKETIO_ASYNC_MODE = os.getenv('SOCKETIO_ASYNC_MODE', 'threading')
+
 class DevelopmentConfig(Config):
     """Development environment configuration with relaxed security for testing."""
     # Override for development - allow more permissive settings

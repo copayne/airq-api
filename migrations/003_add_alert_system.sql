@@ -16,15 +16,6 @@ CREATE TABLE IF NOT EXISTS alert_thresholds (
     -- Cooldown in minutes between alerts
     cooldown_minutes INTEGER NOT NULL DEFAULT 30,
 
-    -- Channel toggles
-    email_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-    browser_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-    ntfy_enabled BOOLEAN NOT NULL DEFAULT FALSE,
-
-    -- ntfy configuration
-    ntfy_topic VARCHAR(255),
-    ntfy_server VARCHAR(500) DEFAULT 'https://ntfy.sh',
-
     is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
