@@ -1,9 +1,11 @@
-# virtual environment
+# Virtual environment
 /env
-.env
-__pycache__
 /airq
 /airq2
-.env.example
-CLAUDE.md
-OPTIMIZE.md
+__pycache__
+
+# Environment variables (contains secrets)
+.env
+
+# Ring snapshots directory
+/ring_snapshots

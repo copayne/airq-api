@@ -3933,10 +3933,18 @@ class Query(graphene.ObjectType):
             joinedload(SensorReadingModel.sensor).selectinload(Sensor.sensor_locations).joinedload(SensorLocation.location)
         )
 
+        # Handle date filtering - convert timezone-aware datetimes to naive UTC
+        # The database stores naive datetimes (in UTC), so we must strip tzinfo for comparison
         if filters.start_date:
-            query = query.filter(SensorReadingModel.reading_time >= filters.start_date)
+            start_date = filters.start_date
+            if hasattr(start_date, 'tzinfo') and start_date.tzinfo is not None:
+                start_date = start_date.replace(tzinfo=None)
+            query = query.filter(SensorReadingModel.reading_time >= start_date)
         if filters.end_date:
-            query = query.filter(SensorReadingModel.reading_time <= filters.end_date)
+            end_date = filters.end_date
+            if hasattr(end_date, 'tzinfo') and end_date.tzinfo is not None:
+                end_date = end_date.replace(tzinfo=None)
+            query = query.filter(SensorReadingModel.reading_time <= end_date)
         # Optimized joins - combine measurement filters into single query with outer joins
         measurement_filters = []
         
