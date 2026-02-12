@@ -3075,6 +3075,368 @@ class UpdateSensorNetwork(graphene.Mutation):
         )
 
 
+# ---- Sensor Calibration Mutations ----
+
+class CalibrationResult(graphene.ObjectType):
+    """Result of a calibration operation."""
+    success = graphene.Boolean(required=True)
+    message = graphene.String()
+    error = graphene.String()
+    pre_calibration_co2 = graphene.Int()
+    post_calibration_co2 = graphene.Int()
+    correction = graphene.Int()
+    reference_co2 = graphene.Int()
+
+
+class CalibrationStatus(graphene.ObjectType):
+    """Current calibration status of a sensor."""
+    serial_number = graphene.List(graphene.String)
+    asc_enabled = graphene.Boolean()
+    temperature_offset = graphene.Float()
+    current_co2 = graphene.Int()
+    current_temperature = graphene.Float()
+    current_humidity = graphene.Float()
+
+
+class CalibrateSensorFRC(graphene.Mutation):
+    """Perform Forced Recalibration on a sensor.
+
+    The sensor should be exposed to the reference CO2 concentration
+    (typically fresh outdoor air at ~420 ppm) for at least 3 minutes
+    before triggering this mutation.
+    """
+    class Arguments:
+        sensor_id = graphene.Int(required=True, description="ID of the sensor to calibrate")
+        reference_co2 = graphene.Int(
+            default_value=420,
+            description="Reference CO2 concentration in ppm (default: 420 for fresh outdoor air)"
+        )
+
+    success = graphene.Boolean()
+    message = graphene.String()
+    result = graphene.Field(CalibrationResult)
+    sensor = graphene.Field(SensorObject)
+
+    @staticmethod
+    def mutate(root: Any, info: Any, sensor_id: int, reference_co2: int = 420):
+        import requests
+        from datetime import datetime
+
+        sensor = Sensor.query.get(sensor_id)
+        if not sensor:
+            return CalibrateSensorFRC(
+                success=False,
+                message=f"Sensor with ID {sensor_id} not found"
+            )
+
+        if not sensor.ip_address:
+            return CalibrateSensorFRC(
+                success=False,
+                message="Sensor IP address not configured"
+            )
+
+        calibration_port = sensor.calibration_port or 5001
+        url = f"http://{sensor.ip_address}:{calibration_port}/calibrate/frc"
+
+        try:
+            response = requests.post(
+                url,
+                json={"reference_co2": reference_co2},
+                timeout=120  # Calibration can take time
+            )
+            data = response.json()
+
+            if data.get('success'):
+                # Update sensor calibration tracking
+                sensor.last_calibration_time = datetime.utcnow()
+                sensor.last_calibration_reference_co2 = reference_co2
+                db.session.commit()
+
+                result = CalibrationResult(
+                    success=True,
+                    message=data.get('message'),
+                    pre_calibration_co2=data.get('pre_calibration_co2'),
+                    post_calibration_co2=data.get('post_calibration_co2'),
+                    correction=data.get('correction'),
+                    reference_co2=reference_co2
+                )
+
+                return CalibrateSensorFRC(
+                    success=True,
+                    message="Calibration successful",
+                    result=result,
+                    sensor=sensor
+                )
+            else:
+                return CalibrateSensorFRC(
+                    success=False,
+                    message=data.get('message', 'Calibration failed'),
+                    result=CalibrationResult(
+                        success=False,
+                        error=data.get('error')
+                    )
+                )
+
+        except requests.exceptions.Timeout:
+            return CalibrateSensorFRC(
+                success=False,
+                message="Calibration request timed out"
+            )
+        except requests.exceptions.ConnectionError:
+            return CalibrateSensorFRC(
+                success=False,
+                message=f"Cannot connect to sensor at {sensor.ip_address}:{calibration_port}"
+            )
+        except Exception as e:
+            return CalibrateSensorFRC(
+                success=False,
+                message=f"Calibration failed: {str(e)}"
+            )
+
+
+class SetSensorASC(graphene.Mutation):
+    """Enable or disable Automatic Self-Calibration on a sensor."""
+    class Arguments:
+        sensor_id = graphene.Int(required=True)
+        enabled = graphene.Boolean(required=True, description="True to enable ASC, False to disable")
+
+    success = graphene.Boolean()
+    message = graphene.String()
+    sensor = graphene.Field(SensorObject)
+
+    @staticmethod
+    def mutate(root: Any, info: Any, sensor_id: int, enabled: bool):
+        import requests
+
+        sensor = Sensor.query.get(sensor_id)
+        if not sensor:
+            return SetSensorASC(
+                success=False,
+                message=f"Sensor with ID {sensor_id} not found"
+            )
+
+        if not sensor.ip_address:
+            return SetSensorASC(
+                success=False,
+                message="Sensor IP address not configured"
+            )
+
+        calibration_port = sensor.calibration_port or 5001
+        url = f"http://{sensor.ip_address}:{calibration_port}/calibrate/asc"
+
+        try:
+            response = requests.post(
+                url,
+                json={"enabled": enabled},
+                timeout=30
+            )
+            data = response.json()
+
+            if data.get('success'):
+                sensor.auto_calibration_enabled = enabled
+                db.session.commit()
+
+                return SetSensorASC(
+                    success=True,
+                    message=f"ASC {'enabled' if enabled else 'disabled'} successfully",
+                    sensor=sensor
+                )
+            else:
+                return SetSensorASC(
+                    success=False,
+                    message=data.get('message', 'Failed to set ASC')
+                )
+
+        except Exception as e:
+            return SetSensorASC(
+                success=False,
+                message=f"Failed to set ASC: {str(e)}"
+            )
+
+
+class SetSensorTemperatureOffset(graphene.Mutation):
+    """Set temperature offset compensation for a sensor."""
+    class Arguments:
+        sensor_id = graphene.Int(required=True)
+        offset = graphene.Float(required=True, description="Temperature offset in Celsius (can be negative)")
+
+    success = graphene.Boolean()
+    message = graphene.String()
+    sensor = graphene.Field(SensorObject)
+
+    @staticmethod
+    def mutate(root: Any, info: Any, sensor_id: int, offset: float):
+        import requests
+
+        sensor = Sensor.query.get(sensor_id)
+        if not sensor:
+            return SetSensorTemperatureOffset(
+                success=False,
+                message=f"Sensor with ID {sensor_id} not found"
+            )
+
+        if not sensor.ip_address:
+            return SetSensorTemperatureOffset(
+                success=False,
+                message="Sensor IP address not configured"
+            )
+
+        calibration_port = sensor.calibration_port or 5001
+        url = f"http://{sensor.ip_address}:{calibration_port}/calibrate/temp"
+
+        try:
+            response = requests.post(
+                url,
+                json={"offset": offset},
+                timeout=30
+            )
+            data = response.json()
+
+            if data.get('success'):
+                sensor.temperature_offset = offset
+                db.session.commit()
+
+                return SetSensorTemperatureOffset(
+                    success=True,
+                    message=f"Temperature offset set to {offset}°C",
+                    sensor=sensor
+                )
+            else:
+                return SetSensorTemperatureOffset(
+                    success=False,
+                    message=data.get('message', 'Failed to set temperature offset')
+                )
+
+        except Exception as e:
+            return SetSensorTemperatureOffset(
+                success=False,
+                message=f"Failed to set temperature offset: {str(e)}"
+            )
+
+
+class FactoryResetSensor(graphene.Mutation):
+    """Reset sensor calibration to factory defaults."""
+    class Arguments:
+        sensor_id = graphene.Int(required=True)
+
+    success = graphene.Boolean()
+    message = graphene.String()
+    sensor = graphene.Field(SensorObject)
+
+    @staticmethod
+    def mutate(root: Any, info: Any, sensor_id: int):
+        import requests
+
+        sensor = Sensor.query.get(sensor_id)
+        if not sensor:
+            return FactoryResetSensor(
+                success=False,
+                message=f"Sensor with ID {sensor_id} not found"
+            )
+
+        if not sensor.ip_address:
+            return FactoryResetSensor(
+                success=False,
+                message="Sensor IP address not configured"
+            )
+
+        calibration_port = sensor.calibration_port or 5001
+        url = f"http://{sensor.ip_address}:{calibration_port}/calibrate/reset"
+
+        try:
+            response = requests.post(url, json={}, timeout=30)
+            data = response.json()
+
+            if data.get('success'):
+                # Clear local calibration tracking
+                sensor.last_calibration_time = None
+                sensor.last_calibration_reference_co2 = None
+                sensor.auto_calibration_enabled = True
+                sensor.temperature_offset = 0.0
+                db.session.commit()
+
+                return FactoryResetSensor(
+                    success=True,
+                    message="Sensor reset to factory defaults",
+                    sensor=sensor
+                )
+            else:
+                return FactoryResetSensor(
+                    success=False,
+                    message=data.get('message', 'Factory reset failed')
+                )
+
+        except Exception as e:
+            return FactoryResetSensor(
+                success=False,
+                message=f"Factory reset failed: {str(e)}"
+            )
+
+
+class GetSensorCalibrationStatus(graphene.Mutation):
+    """Get current calibration status from a sensor."""
+    class Arguments:
+        sensor_id = graphene.Int(required=True)
+
+    success = graphene.Boolean()
+    message = graphene.String()
+    status = graphene.Field(CalibrationStatus)
+
+    @staticmethod
+    def mutate(root: Any, info: Any, sensor_id: int):
+        import requests
+
+        sensor = Sensor.query.get(sensor_id)
+        if not sensor:
+            return GetSensorCalibrationStatus(
+                success=False,
+                message=f"Sensor with ID {sensor_id} not found"
+            )
+
+        if not sensor.ip_address:
+            return GetSensorCalibrationStatus(
+                success=False,
+                message="Sensor IP address not configured"
+            )
+
+        calibration_port = sensor.calibration_port or 5001
+        url = f"http://{sensor.ip_address}:{calibration_port}/status"
+
+        try:
+            response = requests.get(url, timeout=60)
+            data = response.json()
+
+            if data.get('success'):
+                status_data = data.get('status', {})
+                reading = status_data.get('current_reading', {})
+
+                status = CalibrationStatus(
+                    serial_number=status_data.get('serial_number'),
+                    asc_enabled=status_data.get('asc_enabled'),
+                    temperature_offset=status_data.get('temperature_offset'),
+                    current_co2=reading.get('co2'),
+                    current_temperature=reading.get('temperature'),
+                    current_humidity=reading.get('humidity')
+                )
+
+                return GetSensorCalibrationStatus(
+                    success=True,
+                    message="Status retrieved successfully",
+                    status=status
+                )
+            else:
+                return GetSensorCalibrationStatus(
+                    success=False,
+                    message=data.get('message', 'Failed to get status')
+                )
+
+        except Exception as e:
+            return GetSensorCalibrationStatus(
+                success=False,
+                message=f"Failed to get status: {str(e)}"
+            )
+
+
 # ---- Alert System Types, Inputs, and Mutations ----
 
 class AlertThresholdObject(SQLAlchemyObjectType):
@@ -3317,6 +3679,13 @@ class Mutation(graphene.ObjectType):
     # Sensor Health Monitoring
     ping_sensor = PingSensor.Field()
     update_sensor_network = UpdateSensorNetwork.Field()
+
+    # Sensor Calibration
+    calibrate_sensor_frc = CalibrateSensorFRC.Field()
+    set_sensor_asc = SetSensorASC.Field()
+    set_sensor_temperature_offset = SetSensorTemperatureOffset.Field()
+    factory_reset_sensor = FactoryResetSensor.Field()
+    get_sensor_calibration_status = GetSensorCalibrationStatus.Field()
 
     # Sensor-Location Assignment
     assign_sensor_to_location = AssignSensorToLocation.Field()

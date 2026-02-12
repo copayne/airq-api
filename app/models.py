@@ -323,6 +323,13 @@ class Sensor(db.Model):
     # Network configuration for health checks
     ip_address = db.Column(db.String(45))  # IPv4 or IPv6
     health_check_port = db.Column(db.Integer, default=8080)
+    calibration_port = db.Column(db.Integer, default=5001)
+
+    # Calibration tracking
+    last_calibration_time = db.Column(db.DateTime)
+    last_calibration_reference_co2 = db.Column(db.Integer)  # Reference CO2 used for last FRC
+    auto_calibration_enabled = db.Column(db.Boolean, default=True)
+    temperature_offset = db.Column(db.Float, default=0.0)
 
     # Health tracking fields (updated automatically)
     last_reading_time = db.Column(db.DateTime)
