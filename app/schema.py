@@ -1,7 +1,7 @@
 import graphene
 from graphene_sqlalchemy import SQLAlchemyObjectType
 from typing import Optional, List, Any, Dict
-from app.models import CO2Reading, ErrorLog, HumidityReading, Location, Sensor, SensorLocation, SensorReading as SensorReadingModel, TemperatureReading, User, RingSnapshot, Camera, RingDevice, DashboardLayout, SensorHealthReport, AlertThreshold, AlertHistory
+from app.models import CO2Reading, HumidityReading, Location, Sensor, SensorLocation, SensorReading as SensorReadingModel, TemperatureReading, User, RingDevice, DashboardLayout, SensorHealthReport, AlertThreshold, AlertHistory
 import requests
 from app import db
 from sqlalchemy import and_, or_, desc, asc
@@ -9,7 +9,7 @@ from sqlalchemy.orm import joinedload, selectinload
 from datetime import datetime, timedelta
 import logging
 from app.auth import require_admin, require_user, get_user_from_context
-from app.cache import cached_query, clear_cache
+from app.cache import cached_query
 
 logger = logging.getLogger(__name__)
 
@@ -300,18 +300,22 @@ class CreateSensorReading(graphene.Mutation):
             db.session.add(sensor_reading)
             db.session.flush()  # This assigns an ID without committing
             
+            # Fetch sensor for offset correction and health tracking
+            sensor = Sensor.query.get(input.sensor_id)
+
             # Create the specific readings with validated data
             if input.humidity_percentage is not None:
                 humidity_reading = HumidityReading(
-                    reading_id=sensor_reading.id, 
+                    reading_id=sensor_reading.id,
                     humidity_percentage=input.humidity_percentage
                 )
                 db.session.add(humidity_reading)
 
             if input.temperature_celsius is not None:
+                corrected_temp = input.temperature_celsius + (sensor.temperature_offset or 0.0)
                 temperature_reading = TemperatureReading(
-                    reading_id=sensor_reading.id, 
-                    temperature_celsius=input.temperature_celsius
+                    reading_id=sensor_reading.id,
+                    temperature_celsius=corrected_temp
                 )
                 db.session.add(temperature_reading)
 
@@ -323,7 +327,6 @@ class CreateSensorReading(graphene.Mutation):
                 db.session.add(co2_reading)
             
             # Update sensor health tracking
-            sensor = Sensor.query.get(input.sensor_id)
             if sensor:
                 sensor.update_health_on_reading(success=True)
                 db.session.add(sensor)
@@ -339,7 +342,7 @@ class CreateSensorReading(graphene.Mutation):
                     'humidity_percentage': input.humidity_percentage,
                     'temperature_celsius': input.temperature_celsius,
                     'co2_ppm': input.co2_ppm,
-                    'timestamp': str(sensor_reading.timestamp),
+                    'timestamp': str(sensor_reading.reading_time),
                 })
             except Exception:
                 logger.error(
@@ -433,15 +436,6 @@ class TemperatureReadingObject(SQLAlchemyObjectType):
 class CO2ReadingObject(SQLAlchemyObjectType):
     class Meta:
         model = CO2Reading
-
-    sensor_reading = graphene.Field(lambda: SensorReadingObject)
-
-    def resolve_sensor_reading(self, info: Any) -> SensorReadingModel:
-        return self.sensor_reading
-
-class ErrorLogObject(SQLAlchemyObjectType):
-    class Meta:
-        model = ErrorLog
 
     sensor_reading = graphene.Field(lambda: SensorReadingObject)
 
@@ -1168,243 +1162,10 @@ class LogoutUser(graphene.Mutation):
             )
 
 
-class CameraObject(SQLAlchemyObjectType):
-    """GraphQL object for Ring cameras."""
-    class Meta:
-        model = Camera
-
-    latest_snapshot = graphene.Field(lambda: RingSnapshotObject)
-
-    def resolve_latest_snapshot(self, info: Any) -> Optional[RingSnapshot]:
-        """Get the most recent snapshot for this camera."""
-        return self.snapshots.order_by(desc(RingSnapshot.capture_timestamp)).first()
-
-
-class RingSnapshotObject(SQLAlchemyObjectType):
-    """GraphQL object for Ring camera snapshots."""
-    class Meta:
-        model = RingSnapshot
-
-    image_url = graphene.String()
-    camera = graphene.Field(CameraObject)
-
-    def resolve_image_url(self, info: Any) -> str:
-        """Generate URL for accessing the snapshot image."""
-        return f"/api/ring-snapshots/{self.id}"
-
-    def resolve_camera(self, info: Any) -> Optional[Camera]:
-        """Get the camera for this snapshot."""
-        return self.camera
-
-
 class RingDeviceObject(SQLAlchemyObjectType):
     """GraphQL object for Ring alarm devices (contact sensors, motion detectors, etc.)."""
     class Meta:
         model = RingDevice
-
-
-class CreateRingSnapshotInput(graphene.InputObjectType):
-    """Input for manually creating a ring snapshot record."""
-    camera_id = graphene.Int(required=True)
-    image_path = graphene.String(required=True)
-    capture_timestamp = graphene.DateTime(required=True)
-    file_size = graphene.Int()
-
-
-class CreateRingSnapshot(graphene.Mutation):
-    """Create a new Ring snapshot record."""
-    class Arguments:
-        input = CreateRingSnapshotInput(required=True)
-
-    snapshot = graphene.Field(RingSnapshotObject)
-    success = graphene.Boolean()
-    message = graphene.String()
-
-    @staticmethod
-    def mutate(root: Any, info: Any, input: CreateRingSnapshotInput) -> 'CreateRingSnapshot':
-        """Create a new Ring snapshot database record."""
-        try:
-            snapshot = RingSnapshot(
-                camera_id=input.camera_id,
-                image_path=input.image_path,
-                capture_timestamp=input.capture_timestamp,
-                file_size=input.file_size
-            )
-
-            db.session.add(snapshot)
-            db.session.commit()
-
-            logger.info(
-                "Ring snapshot created successfully",
-                extra={
-                    'extra_context': {
-                        'camera_id': input.camera_id,
-                        'snapshot_id': snapshot.id,
-                        'operation': 'create_ring_snapshot_success'
-                    }
-                }
-            )
-
-            return CreateRingSnapshot(
-                snapshot=snapshot,
-                success=True,
-                message="Snapshot created successfully"
-            )
-
-        except Exception as e:
-            db.session.rollback()
-            logger.error(
-                "Failed to create Ring snapshot",
-                exc_info=True,
-                extra={
-                    'extra_context': {
-                        'device_id': input.device_id,
-                        'operation': 'create_ring_snapshot_error'
-                    }
-                }
-            )
-
-            return CreateRingSnapshot(
-                snapshot=None,
-                success=False,
-                message="Failed to create snapshot record"
-            )
-
-
-class CaptureRingSnapshot(graphene.Mutation):
-    """Capture a new Ring snapshot synchronously."""
-    class Arguments:
-        camera_id = graphene.Int()
-
-    snapshot = graphene.Field(RingSnapshotObject)
-    success = graphene.Boolean()
-    message = graphene.String()
-
-    @staticmethod
-    def mutate(root: Any, info: Any, camera_id: Optional[int] = None) -> 'CaptureRingSnapshot':
-        """Capture a Ring snapshot by running the capture script synchronously."""
-        import subprocess
-        import os
-        import sys
-
-        try:
-            # Look up camera if camera_id provided, otherwise use default
-            camera = None
-            if camera_id:
-                camera = Camera.query.get(camera_id)
-                if not camera:
-                    return CaptureRingSnapshot(
-                        snapshot=None,
-                        success=False,
-                        message=f"Camera with ID {camera_id} not found"
-                    )
-
-            script_path = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                'scripts',
-                'capture_ring_snapshot.py'
-            )
-
-            if not os.path.exists(script_path):
-                return CaptureRingSnapshot(
-                    snapshot=None,
-                    success=False,
-                    message="Capture script not found"
-                )
-
-            logger.info(
-                "Starting Ring snapshot capture",
-                extra={
-                    'extra_context': {
-                        'camera_id': camera_id,
-                        'device_id': camera.device_id if camera else None,
-                        'operation': 'capture_ring_snapshot_start'
-                    }
-                }
-            )
-
-            # Build command with optional device_id argument
-            cmd = [sys.executable, script_path]
-            if camera:
-                cmd.extend(['--device-id', camera.device_id])
-
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=60
-            )
-
-            if result.returncode != 0:
-                logger.error(
-                    "Capture script failed",
-                    extra={
-                        'extra_context': {
-                            'return_code': result.returncode,
-                            'stderr': result.stderr,
-                            'operation': 'capture_ring_snapshot_script_error'
-                        }
-                    }
-                )
-                return CaptureRingSnapshot(
-                    snapshot=None,
-                    success=False,
-                    message=f"Capture failed: {result.stderr}"
-                )
-
-            latest_snapshot = RingSnapshot.query.order_by(
-                desc(RingSnapshot.created_at)
-            ).first()
-
-            if latest_snapshot:
-                logger.info(
-                    "Ring snapshot captured successfully",
-                    extra={
-                        'extra_context': {
-                            'snapshot_id': latest_snapshot.id,
-                            'device_id': latest_snapshot.device_id,
-                            'operation': 'capture_ring_snapshot_success'
-                        }
-                    }
-                )
-                return CaptureRingSnapshot(
-                    snapshot=latest_snapshot,
-                    success=True,
-                    message="Snapshot captured successfully"
-                )
-            else:
-                return CaptureRingSnapshot(
-                    snapshot=None,
-                    success=False,
-                    message="Capture completed but snapshot not found in database"
-                )
-
-        except subprocess.TimeoutExpired:
-            logger.error(
-                "Capture script timeout",
-                extra={'extra_context': {'operation': 'capture_ring_snapshot_timeout'}}
-            )
-            return CaptureRingSnapshot(
-                snapshot=None,
-                success=False,
-                message="Capture timeout after 60 seconds"
-            )
-        except Exception as e:
-            logger.error(
-                "Failed to capture Ring snapshot",
-                exc_info=True,
-                extra={
-                    'extra_context': {
-                        'error_type': type(e).__name__,
-                        'operation': 'capture_ring_snapshot_error'
-                    }
-                }
-            )
-            return CaptureRingSnapshot(
-                snapshot=None,
-                success=False,
-                message=f"Capture failed: {str(e)}"
-            )
 
 
 class RingDeviceInput(graphene.InputObjectType):
@@ -1769,7 +1530,7 @@ class DeleteLocation(graphene.Mutation):
 class CreateSensorInput(graphene.InputObjectType):
     """Input for creating a new sensor."""
     name = graphene.String(required=True, description="Sensor name (required, max 100 chars)")
-    model = graphene.String(required=True, description="Sensor model (required, max 100 chars)")
+    hostname = graphene.String(required=True, description="Sensor hostname (required, max 100 chars)")
     installation_date = graphene.DateTime(description="Installation date (defaults to now)")
 
 
@@ -1777,7 +1538,7 @@ class UpdateSensorInput(graphene.InputObjectType):
     """Input for updating an existing sensor."""
     id = graphene.Int(required=True, description="Sensor ID to update")
     name = graphene.String(description="New sensor name")
-    model = graphene.String(description="New sensor model")
+    hostname = graphene.String(description="New sensor hostname")
     is_active = graphene.Boolean(description="Sensor active status")
 
 
@@ -1805,7 +1566,7 @@ class CreateSensor(graphene.Mutation):
         validator = SensorInputValidator()
         validation_result = validator.validate_create_input(
             name=input.name,
-            model=input.model,
+            hostname=input.hostname,
             installation_date=input.installation_date
         )
 
@@ -1815,7 +1576,7 @@ class CreateSensor(graphene.Mutation):
                 extra={
                     'extra_context': {
                         'name': input.name,
-                        'model': input.model,
+                        'hostname': input.hostname,
                         'validation_errors': validation_result.error_messages,
                         'operation': 'create_sensor_validation'
                     }
@@ -1831,7 +1592,7 @@ class CreateSensor(graphene.Mutation):
         try:
             sensor = Sensor(
                 name=input.name.strip(),
-                model=input.model.strip(),
+                hostname=input.hostname.strip(),
                 installation_date=input.installation_date if input.installation_date else datetime.utcnow(),
                 is_active=True
             )
@@ -1845,7 +1606,7 @@ class CreateSensor(graphene.Mutation):
                     'extra_context': {
                         'sensor_id': sensor.id,
                         'name': sensor.name,
-                        'model': sensor.model,
+                        'hostname': sensor.hostname,
                         'operation': 'create_sensor_success'
                     }
                 }
@@ -1866,7 +1627,7 @@ class CreateSensor(graphene.Mutation):
                 extra={
                     'extra_context': {
                         'name': input.name,
-                        'model': input.model,
+                        'hostname': input.hostname,
                         'operation': 'create_sensor_error'
                     }
                 }
@@ -1896,7 +1657,7 @@ class UpdateSensor(graphene.Mutation):
         validation_result = validator.validate_update_input(
             sensor_id=input.id,
             name=input.name,
-            model=input.model,
+            hostname=input.hostname,
             is_active=input.is_active
         )
 
@@ -1923,8 +1684,8 @@ class UpdateSensor(graphene.Mutation):
 
             if input.name is not None:
                 sensor.name = input.name.strip()
-            if input.model is not None:
-                sensor.model = input.model.strip()
+            if input.hostname is not None:
+                sensor.hostname = input.hostname.strip()
             if input.is_active is not None:
                 sensor.is_active = input.is_active
 
@@ -3661,8 +3422,6 @@ class Mutation(graphene.ObjectType):
     logout_user = LogoutUser.Field()
     update_profile = UpdateProfile.Field()
     change_password = ChangePassword.Field()
-    create_ring_snapshot = CreateRingSnapshot.Field()
-    capture_ring_snapshot = CaptureRingSnapshot.Field()
     batch_update_ring_devices = BatchUpdateRingDevices.Field()
 
     # Location Management
@@ -3711,11 +3470,6 @@ class Query(graphene.ObjectType):
     locations = graphene.List(LocationObject)
     sensor_locations = graphene.List(SensorLocationObject)
     sensor_readings = graphene.List(SensorReadingObject)
-    humidity_readings = graphene.List(HumidityReadingObject)
-    temperature_readings = graphene.List(TemperatureReadingObject)
-    co2_readings = graphene.List(CO2ReadingObject)
-    error_logs = graphene.List(ErrorLogObject)
-
     # User queries
     users = graphene.List(UserObject)
     me = graphene.Field(UserObject)
@@ -3729,21 +3483,6 @@ class Query(graphene.ObjectType):
     daily_air_quality_scores = graphene.List(
         DailyAirQualityScore,
         days=graphene.Int(default_value=365, description="Number of days to include (default 365)")
-    )
-
-    # Camera queries
-    cameras = graphene.List(CameraObject)
-    camera = graphene.Field(CameraObject, id=graphene.Int(), device_id=graphene.String())
-
-    # Ring snapshot queries
-    ring_snapshots = graphene.List(
-        RingSnapshotObject,
-        camera_id=graphene.Int(),
-        limit=graphene.Int()
-    )
-    latest_ring_snapshot = graphene.Field(
-        RingSnapshotObject,
-        camera_id=graphene.Int()
     )
 
     # Ring device queries
@@ -3827,18 +3566,6 @@ class Query(graphene.ObjectType):
             joinedload(SensorReadingModel.co2_reading)
         ).order_by(desc(SensorReadingModel.reading_time)).limit(1000).all()
 
-    def resolve_humidity_readings(self, info: Any) -> List[HumidityReading]:
-        return HumidityReading.query.limit(1000).all()
-
-    def resolve_temperature_readings(self, info: Any) -> List[TemperatureReading]:
-        return TemperatureReading.query.limit(1000).all()
-
-    def resolve_co2_readings(self, info: Any) -> List[CO2Reading]:
-        return CO2Reading.query.limit(1000).all()
-
-    def resolve_error_logs(self, info: Any) -> List[ErrorLog]:
-        return ErrorLog.query.order_by(desc(ErrorLog.created_at)).limit(1000).all()
-
     def resolve_sensor(self, info: Any, id: int) -> Optional[Sensor]:
         return Sensor.query.options(
             selectinload(Sensor.readings).selectinload(SensorReadingModel.humidity_reading),
@@ -3897,55 +3624,6 @@ class Query(graphene.ObjectType):
             user_id=user.id,
             is_last_used=True
         ).first()
-
-    def resolve_cameras(self, info: Any) -> List[Camera]:
-        """Get all cameras."""
-        return Camera.query.all()
-
-    def resolve_camera(
-        self,
-        info: Any,
-        id: Optional[int] = None,
-        device_id: Optional[str] = None
-    ) -> Optional[Camera]:
-        """Get a camera by ID or device_id."""
-        if id:
-            return Camera.query.get(id)
-        elif device_id:
-            return Camera.query.filter_by(device_id=device_id).first()
-        return None
-
-    def resolve_ring_snapshots(
-        self,
-        info: Any,
-        camera_id: Optional[int] = None,
-        limit: Optional[int] = 100
-    ) -> List[RingSnapshot]:
-        """Get Ring camera snapshots with optional filtering."""
-        query = RingSnapshot.query
-
-        if camera_id:
-            query = query.filter_by(camera_id=camera_id)
-
-        query = query.order_by(desc(RingSnapshot.capture_timestamp))
-
-        if limit:
-            query = query.limit(limit)
-
-        return query.all()
-
-    def resolve_latest_ring_snapshot(
-        self,
-        info: Any,
-        camera_id: Optional[int] = None
-    ) -> Optional[RingSnapshot]:
-        """Get the most recent Ring camera snapshot."""
-        query = RingSnapshot.query
-
-        if camera_id:
-            query = query.filter_by(camera_id=camera_id)
-
-        return query.order_by(desc(RingSnapshot.capture_timestamp)).first()
 
     def resolve_ring_devices(self, info: Any) -> List[RingDevice]:
         """Get all Ring alarm devices."""
@@ -4497,7 +4175,6 @@ schema = SecureGraphQLSchema(
         PasswordResetRequestInput,
         PasswordResetInput,
         LogoutInput,
-        CreateRingSnapshotInput,
         # Location Management
         CreateLocationInput,
         UpdateLocationInput,

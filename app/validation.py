@@ -31,15 +31,6 @@ class ValidationResult:
         """Get list of error messages."""
         return [error.message for error in self.errors]
     
-    @property
-    def errors_by_field(self) -> Dict[str, List[ValidationError]]:
-        """Group errors by field name."""
-        grouped = {}
-        for error in self.errors:
-            if error.field not in grouped:
-                grouped[error.field] = []
-            grouped[error.field].append(error)
-        return grouped
 
 
 class SensorDataValidator:
@@ -627,13 +618,13 @@ class SensorInputValidator:
         """Initialize sensor input validator."""
         self.errors = []
 
-    def validate_create_input(self, name: str, model: str,
+    def validate_create_input(self, name: str, hostname: str,
                              installation_date: Optional[Any] = None) -> ValidationResult:
         """Validate sensor creation input."""
         self.errors = []
 
         self._validate_name(name)
-        self._validate_model(model)
+        self._validate_hostname(hostname)
 
         if installation_date is not None:
             self._validate_installation_date(installation_date)
@@ -644,7 +635,7 @@ class SensorInputValidator:
         )
 
     def validate_update_input(self, sensor_id: int, name: Optional[str] = None,
-                             model: Optional[str] = None,
+                             hostname: Optional[str] = None,
                              is_active: Optional[bool] = None) -> ValidationResult:
         """Validate sensor update input."""
         from app.models import Sensor
@@ -666,8 +657,8 @@ class SensorInputValidator:
         if name is not None:
             self._validate_name(name)
 
-        if model is not None:
-            self._validate_model(model)
+        if hostname is not None:
+            self._validate_hostname(hostname)
 
         if is_active is not None and not isinstance(is_active, bool):
             self.errors.append(ValidationError(
@@ -678,7 +669,7 @@ class SensorInputValidator:
             ))
 
         # Ensure at least one field is being updated
-        if name is None and model is None and is_active is None:
+        if name is None and hostname is None and is_active is None:
             self.errors.append(ValidationError(
                 field="input",
                 message="At least one field must be provided for update",
@@ -760,33 +751,33 @@ class SensorInputValidator:
                 value=name
             ))
 
-    def _validate_model(self, model: str) -> None:
-        """Validate sensor model."""
-        if not isinstance(model, str):
+    def _validate_hostname(self, hostname: str) -> None:
+        """Validate sensor hostname."""
+        if not isinstance(hostname, str):
             self.errors.append(ValidationError(
-                field="model",
-                message="Model must be a string",
+                field="hostname",
+                message="Hostname must be a string",
                 code="INVALID_TYPE",
-                value=model
+                value=hostname
             ))
             return
 
-        model = model.strip()
+        hostname = hostname.strip()
 
-        if not model:
+        if not hostname:
             self.errors.append(ValidationError(
-                field="model",
-                message="Model is required",
+                field="hostname",
+                message="Hostname is required",
                 code="REQUIRED_FIELD"
             ))
             return
 
-        if len(model) > self.MAX_MODEL_LENGTH:
+        if len(hostname) > self.MAX_MODEL_LENGTH:
             self.errors.append(ValidationError(
-                field="model",
-                message=f"Model cannot exceed {self.MAX_MODEL_LENGTH} characters",
+                field="hostname",
+                message=f"Hostname cannot exceed {self.MAX_MODEL_LENGTH} characters",
                 code="TOO_LONG",
-                value=model
+                value=hostname
             ))
 
     def _validate_installation_date(self, installation_date: Any) -> None:
@@ -1221,29 +1212,3 @@ class DashboardLayoutValidator:
                 message="Widgets must be an array",
                 code="INVALID_TYPE"
             ))
-
-
-def create_validation_error_response(validation_result: ValidationResult) -> Dict[str, Any]:
-    """
-    Create a standardized error response from validation result.
-    
-    Args:
-        validation_result: Result from validation operation
-        
-    Returns:
-        Standardized error response dictionary
-    """
-    return {
-        "success": False,
-        "message": "Validation failed",
-        "errors": [
-            {
-                "field": error.field,
-                "message": error.message,
-                "code": error.code,
-                "value": error.value
-            }
-            for error in validation_result.errors
-        ],
-        "error_count": len(validation_result.errors)
-    }

@@ -130,27 +130,3 @@ def setup_logging(app: Flask, db: SQLAlchemy) -> logging.Logger:
     
     return root_logger
 
-def log_error(message: str, context: Optional[Dict[str, Any]] = None, exc_info: Optional[bool] = None, level: int = logging.ERROR) -> None:
-    """Helper function to log errors with context"""
-    logger = logging.getLogger(__name__)
-    
-    # Add extra context to log record
-    extra = {}
-    if context:
-        extra['extra_context'] = context
-    
-    logger.log(level, message, exc_info=exc_info, extra=extra)
-
-def log_performance(operation: str, duration: float, context: Optional[Dict[str, Any]] = None) -> None:
-    """Helper function to log performance metrics"""
-    logger = logging.getLogger('performance')
-    
-    context = context or {}
-    context.update({
-        'operation': operation,
-        'duration_ms': duration * 1000,  # Convert to milliseconds
-        'performance_metric': True
-    })
-    
-    extra = {'extra_context': context}
-    logger.info(f"Performance: {operation} took {duration:.3f}s", extra=extra)
