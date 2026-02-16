@@ -1771,7 +1771,7 @@ class DeleteLocation(graphene.Mutation):
 class CreateSensorInput(graphene.InputObjectType):
     """Input for creating a new sensor."""
     name = graphene.String(required=True, description="Sensor name (required, max 100 chars)")
-    model = graphene.String(required=True, description="Sensor model (required, max 100 chars)")
+    hostname = graphene.String(required=True, description="Sensor hostname (required, max 100 chars)")
     installation_date = graphene.DateTime(description="Installation date (defaults to now)")
 
 
@@ -1779,7 +1779,7 @@ class UpdateSensorInput(graphene.InputObjectType):
     """Input for updating an existing sensor."""
     id = graphene.Int(required=True, description="Sensor ID to update")
     name = graphene.String(description="New sensor name")
-    model = graphene.String(description="New sensor model")
+    hostname = graphene.String(description="New sensor hostname")
     is_active = graphene.Boolean(description="Sensor active status")
 
 
@@ -1807,7 +1807,7 @@ class CreateSensor(graphene.Mutation):
         validator = SensorInputValidator()
         validation_result = validator.validate_create_input(
             name=input.name,
-            model=input.model,
+            hostname=input.hostname,
             installation_date=input.installation_date
         )
 
@@ -1817,7 +1817,7 @@ class CreateSensor(graphene.Mutation):
                 extra={
                     'extra_context': {
                         'name': input.name,
-                        'model': input.model,
+                        'hostname': input.hostname,
                         'validation_errors': validation_result.error_messages,
                         'operation': 'create_sensor_validation'
                     }
@@ -1833,7 +1833,7 @@ class CreateSensor(graphene.Mutation):
         try:
             sensor = Sensor(
                 name=input.name.strip(),
-                model=input.model.strip(),
+                hostname=input.hostname.strip(),
                 installation_date=input.installation_date if input.installation_date else datetime.utcnow(),
                 is_active=True
             )
@@ -1847,7 +1847,7 @@ class CreateSensor(graphene.Mutation):
                     'extra_context': {
                         'sensor_id': sensor.id,
                         'name': sensor.name,
-                        'model': sensor.model,
+                        'hostname': sensor.hostname,
                         'operation': 'create_sensor_success'
                     }
                 }
@@ -1868,7 +1868,7 @@ class CreateSensor(graphene.Mutation):
                 extra={
                     'extra_context': {
                         'name': input.name,
-                        'model': input.model,
+                        'hostname': input.hostname,
                         'operation': 'create_sensor_error'
                     }
                 }
@@ -1898,7 +1898,7 @@ class UpdateSensor(graphene.Mutation):
         validation_result = validator.validate_update_input(
             sensor_id=input.id,
             name=input.name,
-            model=input.model,
+            hostname=input.hostname,
             is_active=input.is_active
         )
 
@@ -1925,8 +1925,8 @@ class UpdateSensor(graphene.Mutation):
 
             if input.name is not None:
                 sensor.name = input.name.strip()
-            if input.model is not None:
-                sensor.model = input.model.strip()
+            if input.hostname is not None:
+                sensor.hostname = input.hostname.strip()
             if input.is_active is not None:
                 sensor.is_active = input.is_active
 

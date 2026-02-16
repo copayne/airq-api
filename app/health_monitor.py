@@ -42,18 +42,40 @@ def _monitor_loop(socketio, app):
 
 
 def _check_offline_sensors(app):
-    """Check all active sensors for offline status and send alerts."""
+    """Check all active sensors for offline status and send alerts.
+
+    A sensor is considered online if EITHER of these is recent:
+      - last_health_check (health report timestamp)
+      - last_reading_time (sensor data timestamp)
+
+    This prevents false offline alerts for sensors that are actively
+    sending readings but haven't pushed a health report yet.
+    """
     cutoff = datetime.utcnow() - timedelta(minutes=OFFLINE_THRESHOLD_MINUTES)
 
     sensors = Sensor.query.filter_by(is_active=True).all()
 
     for sensor in sensors:
-        if not sensor.last_health_check:
+        # Determine the most recent sign of life from this sensor
+        last_seen = None
+        if sensor.last_health_check and sensor.last_reading_time:
+            last_seen = max(sensor.last_health_check, sensor.last_reading_time)
+        elif sensor.last_health_check:
+            last_seen = sensor.last_health_check
+        elif sensor.last_reading_time:
+            last_seen = sensor.last_reading_time
+
+        if not last_seen:
             continue
 
-        if sensor.last_health_check >= cutoff:
+        if last_seen >= cutoff:
+            # Sensor is alive — if it was marked offline, clear that
+            if sensor.last_health_status == 'offline':
+                sensor.last_health_status = 'healthy'
+                db.session.commit()
             continue
 
+        # Already marked offline — don't re-alert
         if sensor.last_health_status == 'offline':
             continue
 
@@ -62,12 +84,12 @@ def _check_offline_sensors(app):
         db.session.commit()
 
         minutes_offline = int(
-            (datetime.utcnow() - sensor.last_health_check).total_seconds() / 60
+            (datetime.utcnow() - last_seen).total_seconds() / 60
         )
 
         logger.warning(
             f"Sensor {sensor.name} (ID {sensor.id}) detected offline "
-            f"({minutes_offline} minutes since last report)",
+            f"({minutes_offline} minutes since last activity)",
             extra={'extra_context': {
                 'sensor_id': sensor.id,
                 'minutes_offline': minutes_offline,

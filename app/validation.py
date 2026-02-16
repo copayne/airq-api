@@ -621,19 +621,19 @@ class SensorInputValidator:
 
     MIN_NAME_LENGTH = 1
     MAX_NAME_LENGTH = 100
-    MAX_MODEL_LENGTH = 100
+    MAX_HOSTNAME_LENGTH = 100
 
     def __init__(self):
         """Initialize sensor input validator."""
         self.errors = []
 
-    def validate_create_input(self, name: str, model: str,
+    def validate_create_input(self, name: str, hostname: str,
                              installation_date: Optional[Any] = None) -> ValidationResult:
         """Validate sensor creation input."""
         self.errors = []
 
         self._validate_name(name)
-        self._validate_model(model)
+        self._validate_hostname(hostname)
 
         if installation_date is not None:
             self._validate_installation_date(installation_date)
@@ -644,7 +644,7 @@ class SensorInputValidator:
         )
 
     def validate_update_input(self, sensor_id: int, name: Optional[str] = None,
-                             model: Optional[str] = None,
+                             hostname: Optional[str] = None,
                              is_active: Optional[bool] = None) -> ValidationResult:
         """Validate sensor update input."""
         from app.models import Sensor
@@ -666,8 +666,8 @@ class SensorInputValidator:
         if name is not None:
             self._validate_name(name)
 
-        if model is not None:
-            self._validate_model(model)
+        if hostname is not None:
+            self._validate_hostname(hostname)
 
         if is_active is not None and not isinstance(is_active, bool):
             self.errors.append(ValidationError(
@@ -678,7 +678,7 @@ class SensorInputValidator:
             ))
 
         # Ensure at least one field is being updated
-        if name is None and model is None and is_active is None:
+        if name is None and hostname is None and is_active is None:
             self.errors.append(ValidationError(
                 field="input",
                 message="At least one field must be provided for update",
@@ -760,33 +760,33 @@ class SensorInputValidator:
                 value=name
             ))
 
-    def _validate_model(self, model: str) -> None:
-        """Validate sensor model."""
-        if not isinstance(model, str):
+    def _validate_hostname(self, hostname: str) -> None:
+        """Validate sensor hostname."""
+        if not isinstance(hostname, str):
             self.errors.append(ValidationError(
-                field="model",
-                message="Model must be a string",
+                field="hostname",
+                message="Hostname must be a string",
                 code="INVALID_TYPE",
-                value=model
+                value=hostname
             ))
             return
 
-        model = model.strip()
+        hostname = hostname.strip()
 
-        if not model:
+        if not hostname:
             self.errors.append(ValidationError(
-                field="model",
-                message="Model is required",
+                field="hostname",
+                message="Hostname is required",
                 code="REQUIRED_FIELD"
             ))
             return
 
-        if len(model) > self.MAX_MODEL_LENGTH:
+        if len(hostname) > self.MAX_HOSTNAME_LENGTH:
             self.errors.append(ValidationError(
-                field="model",
-                message=f"Model cannot exceed {self.MAX_MODEL_LENGTH} characters",
+                field="hostname",
+                message=f"Hostname cannot exceed {self.MAX_HOSTNAME_LENGTH} characters",
                 code="TOO_LONG",
-                value=model
+                value=hostname
             ))
 
     def _validate_installation_date(self, installation_date: Any) -> None:

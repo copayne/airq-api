@@ -50,12 +50,12 @@ class User(db.Model):
         """Check if provided password matches hash."""
         return bcrypt.verify(password, self.password_hash)
     
-    def generate_jwt_token(self, expires_in: int = 3600) -> str:
+    def generate_jwt_token(self, expires_in: int = 315360000) -> str:
         """Generate JWT token for user authentication.
-        
+
         Args:
-            expires_in: Token expiration time in seconds (default 1 hour)
-            
+            expires_in: Token expiration time in seconds (default 10 years)
+
         Returns:
             JWT token string
         """
@@ -313,7 +313,7 @@ class Sensor(db.Model):
     __tablename__ = 'sensors'
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), nullable=False)
-    model = db.Column(db.String(100), nullable=False)
+    hostname = db.Column(db.String(100), nullable=False)
     installation_date = db.Column(db.DateTime,
         nullable=False, unique=False, index=True,
         default=datetime.utcnow
