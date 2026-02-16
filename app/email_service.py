@@ -146,6 +146,29 @@ class EmailService:
 
         return self._send_email(user_email, subject, text_body, html_body)
 
+    def send_offline_alert(self, user_email: str, username: str, sensor_name: str, location_label: str, minutes_offline: int, severity: str) -> bool:
+        """Send sensor offline alert email."""
+        severity_upper = severity.upper()
+
+        subject = f"SENSOR OFFLINE: {sensor_name} - {location_label}"
+
+        html_body = f"""
+        <html>
+        </html>
+        """
+
+        text_body = f"""
+        SENSOR {severity_upper}
+
+        {sensor_name} at {location_label} has not reported in {minutes_offline} minutes.
+
+        The sensor may be powered off, disconnected, or experiencing network issues.
+
+        View diagnostics: {self.base_url}/settings/diagnostics
+        """
+
+        return self._send_email(user_email, subject, text_body, html_body)
+
     def _send_email(self, to_email: str, subject: str, text_body: str, html_body: str) -> bool:
         """Send email using configured backend."""
         if self.mock_email:

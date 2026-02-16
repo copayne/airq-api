@@ -243,6 +243,7 @@ class CreateSensorReadingInput(graphene.InputObjectType):
     humidity_percentage = graphene.Float()
     temperature_celsius = graphene.Float()
     co2_ppm = graphene.Int()
+    reading_time = graphene.DateTime(description="Original reading timestamp. Defaults to now if omitted.")
 
 class CreateSensorReading(graphene.Mutation):
     class Arguments:
@@ -293,9 +294,10 @@ class CreateSensorReading(graphene.Mutation):
         
         try:
             # Create the sensor reading with validated data
-            sensor_reading = SensorReadingModel(
-                sensor_id=input.sensor_id
-            )
+            reading_kwargs = {'sensor_id': input.sensor_id}
+            if input.reading_time is not None:
+                reading_kwargs['reading_time'] = input.reading_time
+            sensor_reading = SensorReadingModel(**reading_kwargs)
             
             db.session.add(sensor_reading)
             db.session.flush()  # This assigns an ID without committing
@@ -3651,6 +3653,118 @@ class SendTestAlert(graphene.Mutation):
             return SendTestAlert(success=False, message="Failed to send test alert email")
 
 
+class SensorHealthReportInput(graphene.InputObjectType):
+    """Input for push-based sensor health reports from Pi devices."""
+    sensor_id = graphene.Int(required=True)
+    service_running = graphene.Boolean()
+    service_uptime_seconds = graphene.Int()
+    sensor_connected = graphene.Boolean()
+    sensor_data_ready = graphene.Boolean()
+    sensor_serial_number = graphene.String()
+    last_co2_ppm = graphene.Int()
+    last_temperature_celsius = graphene.Float()
+    last_humidity_percentage = graphene.Float()
+    last_reading_time = graphene.String()
+    system_uptime_seconds = graphene.Int()
+    disk_usage_percent = graphene.Float()
+    memory_usage_percent = graphene.Float()
+    cpu_temperature_celsius = graphene.Float()
+    api_reachable = graphene.Boolean()
+    api_response_time_ms = graphene.Int()
+    consecutive_failures = graphene.Int()
+    error_message = graphene.String()
+
+
+class ReportSensorHealth(graphene.Mutation):
+    """Accept a push-based health report from a Pi sensor device."""
+    class Arguments:
+        input = SensorHealthReportInput(required=True)
+
+    success = graphene.Boolean()
+    message = graphene.String()
+
+    @staticmethod
+    def mutate(root: Any, info: Any, input: 'SensorHealthReportInput') -> 'ReportSensorHealth':
+        """Store a health report pushed from a sensor device."""
+        sensor = Sensor.query.get(input.sensor_id)
+        if not sensor:
+            return ReportSensorHealth(
+                success=False,
+                message=f"Sensor with ID {input.sensor_id} not found"
+            )
+
+        try:
+            # Parse last_reading_time if provided
+            last_reading = None
+            if input.last_reading_time:
+                try:
+                    last_reading = datetime.fromisoformat(input.last_reading_time)
+                except (ValueError, TypeError):
+                    pass
+
+            report = SensorHealthReport(
+                sensor_id=input.sensor_id,
+                service_running=input.service_running,
+                service_uptime_seconds=input.service_uptime_seconds,
+                sensor_connected=input.sensor_connected,
+                sensor_data_ready=input.sensor_data_ready,
+                sensor_serial_number=input.sensor_serial_number,
+                last_co2_ppm=input.last_co2_ppm,
+                last_temperature_celsius=input.last_temperature_celsius,
+                last_humidity_percentage=input.last_humidity_percentage,
+                last_reading_time=last_reading,
+                system_uptime_seconds=input.system_uptime_seconds,
+                disk_usage_percent=input.disk_usage_percent,
+                memory_usage_percent=input.memory_usage_percent,
+                cpu_temperature_celsius=input.cpu_temperature_celsius,
+                api_reachable=input.api_reachable,
+                api_response_time_ms=input.api_response_time_ms,
+                consecutive_failures=input.consecutive_failures,
+                error_message=input.error_message,
+            )
+            db.session.add(report)
+
+            # Update sensor health tracking
+            sensor.last_health_check = datetime.utcnow()
+            sensor.last_health_status = 'healthy' if input.sensor_connected else 'degraded'
+
+            db.session.commit()
+
+            # Publish real-time event
+            try:
+                from app.events import publish_sensor_health
+                publish_sensor_health({
+                    'sensor_id': input.sensor_id,
+                    'health_status': sensor.last_health_status,
+                    'report_time': report.report_time.isoformat() if report.report_time else None,
+                })
+            except Exception:
+                pass
+
+            logger.info(
+                "Health report received",
+                extra={'extra_context': {
+                    'sensor_id': input.sensor_id,
+                    'health_status': sensor.last_health_status,
+                    'operation': 'report_sensor_health',
+                }}
+            )
+
+            return ReportSensorHealth(success=True, message="Health report recorded")
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(
+                "Failed to store health report",
+                exc_info=True,
+                extra={'extra_context': {
+                    'sensor_id': input.sensor_id,
+                    'operation': 'report_sensor_health_error',
+                }}
+            )
+            return ReportSensorHealth(success=False, message="Failed to store health report")
+
+
 class Mutation(graphene.ObjectType):
     create_sensor_reading = CreateSensorReading.Field()
     register_user = RegisterUser.Field()
@@ -3705,6 +3819,9 @@ class Mutation(graphene.ObjectType):
     acknowledge_alert = AcknowledgeAlert.Field()
     acknowledge_all_alerts = AcknowledgeAllAlerts.Field()
     send_test_alert = SendTestAlert.Field()
+
+    # Push-based health reporting
+    report_sensor_health = ReportSensorHealth.Field()
 
 class Query(graphene.ObjectType):
     sensors = graphene.List(SensorObject)

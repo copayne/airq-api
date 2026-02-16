@@ -96,6 +96,18 @@ def publish_sensor_reading(data: Dict[str, Any]) -> None:
         )
 
 
+def publish_sensor_health(data: Dict[str, Any]) -> None:
+    """Emit a sensor_health event to all connected clients."""
+    try:
+        socketio.emit('sensor_health', data)
+    except Exception:
+        logger.error(
+            "Failed to publish sensor health event",
+            exc_info=True,
+            extra={'extra_context': {'operation': 'publish_sensor_health_error'}}
+        )
+
+
 def publish_alert(user_id: int, data: Dict[str, Any]) -> None:
     """Emit an alert event to a specific user's room."""
     try:

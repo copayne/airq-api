@@ -191,7 +191,11 @@ def create_app(config_class: Optional[Type[Config]] = None) -> Flask:
 
     # Initialize WebSocket support
     from app.events import init_socketio
-    init_socketio(app)
+    socketio = init_socketio(app)
+
+    # Start background health monitor
+    from app.health_monitor import start_health_monitor
+    start_health_monitor(socketio, app)
 
     # Log application startup
     if not app.debug:
