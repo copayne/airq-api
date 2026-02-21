@@ -31,15 +31,6 @@ class ValidationResult:
         """Get list of error messages."""
         return [error.message for error in self.errors]
     
-    @property
-    def errors_by_field(self) -> Dict[str, List[ValidationError]]:
-        """Group errors by field name."""
-        grouped = {}
-        for error in self.errors:
-            if error.field not in grouped:
-                grouped[error.field] = []
-            grouped[error.field].append(error)
-        return grouped
 
 
 class SensorDataValidator:
@@ -1221,29 +1212,3 @@ class DashboardLayoutValidator:
                 message="Widgets must be an array",
                 code="INVALID_TYPE"
             ))
-
-
-def create_validation_error_response(validation_result: ValidationResult) -> Dict[str, Any]:
-    """
-    Create a standardized error response from validation result.
-    
-    Args:
-        validation_result: Result from validation operation
-        
-    Returns:
-        Standardized error response dictionary
-    """
-    return {
-        "success": False,
-        "message": "Validation failed",
-        "errors": [
-            {
-                "field": error.field,
-                "message": error.message,
-                "code": error.code,
-                "value": error.value
-            }
-            for error in validation_result.errors
-        ],
-        "error_count": len(validation_result.errors)
-    }
