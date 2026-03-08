@@ -296,12 +296,7 @@ class TokenBlacklist(db.Model):
     def cleanup_expired_tokens() -> int:
         """Remove expired tokens from blacklist and return count removed."""
         current_time = datetime.utcnow()
-        expired_tokens = TokenBlacklist.query.filter(TokenBlacklist.expires_at < current_time).all()
-        count = len(expired_tokens)
-        
-        for token in expired_tokens:
-            db.session.delete(token)
-        
+        count = TokenBlacklist.query.filter(TokenBlacklist.expires_at < current_time).delete()
         db.session.commit()
         return count
     

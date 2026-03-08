@@ -8,10 +8,13 @@ sensors stop reporting.
 import logging
 from datetime import datetime, timedelta
 
+from sqlalchemy import or_
+
 from app import db
 from app.models import (
-    Sensor, SensorLocation, AlertThreshold, AlertHistory, AlertCooldown, User
+    Sensor, AlertThreshold, AlertHistory, User
 )
+from app.alert_service import is_in_cooldown, upsert_cooldown, get_location_label
 
 logger = logging.getLogger(__name__)
 
@@ -54,16 +57,14 @@ def _check_offline_sensors(app):
     cutoff = datetime.utcnow() - timedelta(minutes=OFFLINE_THRESHOLD_MINUTES)
 
     sensors = Sensor.query.filter_by(is_active=True).all()
+    newly_offline = []
 
     for sensor in sensors:
         # Determine the most recent sign of life from this sensor
-        last_seen = None
-        if sensor.last_health_check and sensor.last_reading_time:
-            last_seen = max(sensor.last_health_check, sensor.last_reading_time)
-        elif sensor.last_health_check:
-            last_seen = sensor.last_health_check
-        elif sensor.last_reading_time:
-            last_seen = sensor.last_reading_time
+        last_seen = max(
+            filter(None, [sensor.last_health_check, sensor.last_reading_time]),
+            default=None,
+        )
 
         if not last_seen:
             continue
@@ -72,7 +73,6 @@ def _check_offline_sensors(app):
             # Sensor is alive — if it was marked offline, clear that
             if sensor.last_health_status == 'offline':
                 sensor.last_health_status = 'healthy'
-                db.session.commit()
             continue
 
         # Already marked offline — don't re-alert
@@ -81,11 +81,10 @@ def _check_offline_sensors(app):
 
         # Sensor has gone offline
         sensor.last_health_status = 'offline'
-        db.session.commit()
-
         minutes_offline = int(
             (datetime.utcnow() - last_seen).total_seconds() / 60
         )
+        newly_offline.append((sensor, minutes_offline))
 
         logger.warning(
             f"Sensor {sensor.name} (ID {sensor.id}) detected offline "
@@ -97,6 +96,10 @@ def _check_offline_sensors(app):
             }}
         )
 
+    # Batch-commit all status changes
+    db.session.commit()
+
+    for sensor, minutes_offline in newly_offline:
         _send_offline_alerts(sensor, minutes_offline)
 
         # Publish WebSocket event
@@ -115,30 +118,25 @@ def _send_offline_alerts(sensor, minutes_offline):
     """Send offline alert to all users with enabled alert thresholds."""
     from app.email_service import email_service
 
-    # Get location label
-    location_label = "Unknown Location"
-    current_location = SensorLocation.query.filter_by(
-        sensor_id=sensor.id, is_current=True
-    ).first()
-    if current_location and current_location.location:
-        location_label = current_location.location.name
+    location_label = get_location_label(sensor.id)
 
     # Find all users with enabled thresholds for this sensor (or global)
     thresholds = AlertThreshold.query.filter(
         AlertThreshold.is_enabled == True,  # noqa: E712
+        or_(
+            AlertThreshold.sensor_id == sensor.id,
+            AlertThreshold.sensor_id.is_(None),
+        )
     ).all()
 
     alerted_user_ids = set()
     for threshold in thresholds:
-        if threshold.sensor_id is not None and threshold.sensor_id != sensor.id:
-            continue
-
         user_id = threshold.user_id
         if user_id in alerted_user_ids:
             continue
 
         # Check cooldown
-        if _is_offline_in_cooldown(user_id, sensor.id):
+        if is_in_cooldown(user_id, sensor.id, OFFLINE_COOLDOWN_MINUTES, 'critical', allow_escalation=False):
             continue
 
         user = User.query.get(user_id)
@@ -172,7 +170,7 @@ def _send_offline_alerts(sensor, minutes_offline):
         db.session.add(alert)
 
         # Update cooldown
-        _upsert_offline_cooldown(user_id, sensor.id)
+        upsert_cooldown(user_id, sensor.id, 'critical')
 
         alerted_user_ids.add(user_id)
 
@@ -193,33 +191,3 @@ def _send_offline_alerts(sensor, minutes_offline):
         db.session.commit()
 
 
-def _is_offline_in_cooldown(user_id, sensor_id):
-    """Check if an offline alert is in cooldown for this user+sensor."""
-    cooldown = AlertCooldown.query.filter_by(
-        user_id=user_id, sensor_id=sensor_id
-    ).first()
-
-    if not cooldown:
-        return False
-
-    elapsed = (datetime.utcnow() - cooldown.last_alert_time).total_seconds() / 60
-    return elapsed < OFFLINE_COOLDOWN_MINUTES
-
-
-def _upsert_offline_cooldown(user_id, sensor_id):
-    """Update or create cooldown record for offline alerts."""
-    cooldown = AlertCooldown.query.filter_by(
-        user_id=user_id, sensor_id=sensor_id
-    ).first()
-
-    if cooldown:
-        cooldown.last_alert_time = datetime.utcnow()
-        cooldown.last_severity = 'critical'
-    else:
-        cooldown = AlertCooldown(
-            user_id=user_id,
-            sensor_id=sensor_id,
-            last_alert_time=datetime.utcnow(),
-            last_severity='critical',
-        )
-        db.session.add(cooldown)

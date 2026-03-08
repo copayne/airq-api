@@ -5,14 +5,12 @@ JWT authentication is enforced on connection.
 """
 
 import logging
-import os
 from typing import Any, Dict
 
-import jwt
 from flask import Flask
 from flask_socketio import SocketIO, disconnect, join_room
 
-from app.models import User, TokenBlacklist
+from app.models import User
 
 logger = logging.getLogger(__name__)
 
@@ -39,43 +37,21 @@ def init_socketio(app: Flask) -> SocketIO:
             disconnect()
             return False
 
-        token = auth['token']
-        try:
-            secret_key = os.environ.get('SECRET_KEY')
-            if not secret_key:
-                disconnect()
-                return False
-
-            payload = jwt.decode(token, secret_key, algorithms=['HS256'])
-            user_id = payload.get('user_id')
-            jti = payload.get('jti')
-
-            if jti and TokenBlacklist.is_token_blacklisted(jti):
-                disconnect()
-                return False
-
-            if not user_id or not User.query.get(user_id):
-                disconnect()
-                return False
-
-            join_room(f'user_{user_id}')
-            logger.info(
-                "WebSocket client connected",
-                extra={'extra_context': {
-                    'user_id': user_id,
-                    'operation': 'websocket_connect',
-                }}
-            )
-            return True
-
-        except jwt.ExpiredSignatureError:
-            logger.warning("WebSocket connection rejected: expired token")
+        user = User.verify_jwt_token(auth['token'])
+        if not user:
+            logger.warning("WebSocket connection rejected: invalid or expired token")
             disconnect()
             return False
-        except jwt.InvalidTokenError:
-            logger.warning("WebSocket connection rejected: invalid token")
-            disconnect()
-            return False
+
+        join_room(f'user_{user.id}')
+        logger.info(
+            "WebSocket client connected",
+            extra={'extra_context': {
+                'user_id': user.id,
+                'operation': 'websocket_connect',
+            }}
+        )
+        return True
 
     @socketio.on('disconnect')
     def handle_disconnect():

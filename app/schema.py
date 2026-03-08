@@ -932,11 +932,7 @@ class ResetPassword(graphene.Mutation):
         try:
             # Validate new password
             validator = UserInputValidator()
-            validation_result = validator.validate_registration_input(
-                username="dummy",  # Not used for password validation
-                email="dummy@example.com",  # Not used for password validation
-                password=input.new_password
-            )
+            validation_result = validator.validate_password(input.new_password)
             if not validation_result.is_valid:
                 return ResetPassword(
                     success=False,
@@ -1003,25 +999,15 @@ class UpdateProfile(graphene.Mutation):
     @require_user
     def mutate(root: Any, info: Any, input: UpdateProfileInput) -> AuthPayload:
         """Update the current user's profile fields."""
-        from app.validation import UserInputValidator
-
         try:
             user = get_user_from_context(info.context)
             if not user:
                 return AuthPayload(success=False, message="Authentication required")
 
-            validator = UserInputValidator()
-
             if input.email is not None:
                 email = input.email.strip().lower()
                 if not email:
                     return AuthPayload(success=False, message="Email cannot be empty")
-                validation_result = validator.validate_registration_input(
-                    username=user.username,
-                    email=email,
-                    password="DummyPass1!"  # Not validating password here
-                )
-                # Check only email-related errors
                 existing = User.query.filter(User.email == email, User.id != user.id).first()
                 if existing:
                     return AuthPayload(success=False, message="Email already registered")
@@ -1085,16 +1071,9 @@ class ChangePassword(graphene.Mutation):
                 return ChangePassword(success=False, message="Current password is incorrect")
 
             validator = UserInputValidator()
-            validation_result = validator.validate_registration_input(
-                username=user.username,
-                email=user.email,
-                password=input.new_password
-            )
+            validation_result = validator.validate_password(input.new_password)
             if not validation_result.is_valid:
-                password_errors = [e.message for e in validation_result.errors if 'password' in e.field.lower()]
-                if password_errors:
-                    return ChangePassword(success=False, message=password_errors[0])
-                return ChangePassword(success=False, message="New password does not meet requirements")
+                return ChangePassword(success=False, message=validation_result.error_messages[0])
 
             user.set_password(input.new_password)
             db.session.commit()
@@ -4113,27 +4092,27 @@ class Query(graphene.ObjectType):
         measurement_filters = []
         
         # CO2 filtering
-        if filters.min_co2_ppm or filters.max_co2_ppm:
+        if filters.min_co2_ppm is not None or filters.max_co2_ppm is not None:
             query = query.outerjoin(CO2Reading)
-            if filters.min_co2_ppm:
+            if filters.min_co2_ppm is not None:
                 measurement_filters.append(CO2Reading.co2_ppm >= filters.min_co2_ppm)
-            if filters.max_co2_ppm:
+            if filters.max_co2_ppm is not None:
                 measurement_filters.append(CO2Reading.co2_ppm <= filters.max_co2_ppm)
-        
+
         # Temperature filtering
-        if filters.min_temperature_celsius or filters.max_temperature_celsius:
+        if filters.min_temperature_celsius is not None or filters.max_temperature_celsius is not None:
             query = query.outerjoin(TemperatureReading)
-            if filters.min_temperature_celsius:
+            if filters.min_temperature_celsius is not None:
                 measurement_filters.append(TemperatureReading.temperature_celsius >= filters.min_temperature_celsius)
-            if filters.max_temperature_celsius:
+            if filters.max_temperature_celsius is not None:
                 measurement_filters.append(TemperatureReading.temperature_celsius <= filters.max_temperature_celsius)
-        
+
         # Humidity filtering
-        if filters.min_humidity_percentage or filters.max_humidity_percentage:
+        if filters.min_humidity_percentage is not None or filters.max_humidity_percentage is not None:
             query = query.outerjoin(HumidityReading)
-            if filters.min_humidity_percentage:
+            if filters.min_humidity_percentage is not None:
                 measurement_filters.append(HumidityReading.humidity_percentage >= filters.min_humidity_percentage)
-            if filters.max_humidity_percentage:
+            if filters.max_humidity_percentage is not None:
                 measurement_filters.append(HumidityReading.humidity_percentage <= filters.max_humidity_percentage)
         
         # Apply all measurement filters together

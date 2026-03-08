@@ -377,6 +377,18 @@ class UserInputValidator:
                 value=email
             ))
     
+    def validate_password(self, password: str) -> ValidationResult:
+        """Validate only the password field.
+
+        Useful for password-change flows where username/email are not being validated.
+        """
+        self.errors = []
+        self._validate_password(password)
+        return ValidationResult(
+            is_valid=len(self.errors) == 0,
+            errors=self.errors.copy()
+        )
+
     def _validate_password(self, password: str) -> None:
         """Validate password strength and format."""
         if not isinstance(password, str):

@@ -21,6 +21,17 @@ logger = logging.getLogger(__name__)
 SEVERITY_RANK = {'warning': 1, 'critical': 2}
 
 
+def get_location_label(sensor_id: int) -> str:
+    """Resolve current location name for a sensor, with fallback to sensor name."""
+    current_assignment = SensorLocation.query.filter_by(
+        sensor_id=sensor_id, is_current=True
+    ).first()
+    if current_assignment and current_assignment.location:
+        return current_assignment.location.name
+    sensor = Sensor.query.get(sensor_id)
+    return sensor.name if sensor else f"Sensor {sensor_id}"
+
+
 def check_and_send_alerts(sensor_id: int, reading_id: int, co2_ppm: int) -> None:
     """Check all enabled thresholds for a sensor reading and send alerts.
 
@@ -57,22 +68,14 @@ def _process_alerts(sensor_id: int, reading_id: int, co2_ppm: int) -> None:
     if not thresholds:
         return
 
-    # Resolve current location name for this sensor
-    current_assignment = SensorLocation.query.filter_by(
-        sensor_id=sensor_id, is_current=True
-    ).first()
-    if current_assignment and current_assignment.location:
-        location_label = current_assignment.location.name
-    else:
-        sensor = Sensor.query.get(sensor_id)
-        location_label = sensor.name if sensor else f"Sensor {sensor_id}"
+    location_label = get_location_label(sensor_id)
 
     for threshold in thresholds:
         severity = _determine_severity(co2_ppm, threshold)
         if severity is None:
             continue
 
-        if _is_in_cooldown(threshold.user_id, sensor_id, threshold.cooldown_minutes, severity):
+        if is_in_cooldown(threshold.user_id, sensor_id, threshold.cooldown_minutes, severity):
             continue
 
         channels, email_status = _send_notifications(threshold, location_label, co2_ppm, severity)
@@ -93,7 +96,7 @@ def _process_alerts(sensor_id: int, reading_id: int, co2_ppm: int) -> None:
         db.session.add(alert)
 
         # Upsert cooldown
-        _upsert_cooldown(threshold.user_id, sensor_id, severity)
+        upsert_cooldown(threshold.user_id, sensor_id, severity)
 
         # Publish real-time WebSocket alert event
         try:
@@ -127,13 +130,14 @@ def _determine_severity(co2_ppm: int, threshold: AlertThreshold) -> Optional[str
     return None
 
 
-def _is_in_cooldown(
-    user_id: int, sensor_id: int, cooldown_minutes: int, current_severity: str
+def is_in_cooldown(
+    user_id: int, sensor_id: int, cooldown_minutes: int,
+    current_severity: str = 'critical', allow_escalation: bool = True,
 ) -> bool:
     """Check if alert should be suppressed due to cooldown.
 
-    Allows escalation: if last alert was 'warning' and current is 'critical',
-    the cooldown is bypassed.
+    When allow_escalation is True (default), escalation from warning → critical
+    bypasses the cooldown.
     """
     cooldown = AlertCooldown.query.filter_by(
         user_id=user_id, sensor_id=sensor_id
@@ -146,15 +150,16 @@ def _is_in_cooldown(
     if elapsed >= timedelta(minutes=cooldown_minutes):
         return False
 
-    # Allow escalation from warning → critical
-    if (SEVERITY_RANK.get(current_severity, 0)
-            > SEVERITY_RANK.get(cooldown.last_severity, 0)):
+    if allow_escalation and (
+        SEVERITY_RANK.get(current_severity, 0)
+        > SEVERITY_RANK.get(cooldown.last_severity, 0)
+    ):
         return False
 
     return True
 
 
-def _upsert_cooldown(user_id: int, sensor_id: int, severity: str) -> None:
+def upsert_cooldown(user_id: int, sensor_id: int, severity: str) -> None:
     """Insert or update cooldown record."""
     cooldown = AlertCooldown.query.filter_by(
         user_id=user_id, sensor_id=sensor_id

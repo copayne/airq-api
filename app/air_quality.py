@@ -272,39 +272,21 @@ def calculate_reading_score(reading: SensorReadingModel) -> float:
     - 100 = perfect air quality (green)
     - 0 = worst air quality (red)
 
+    Uses assess_reading() for condition assessment, then converts
+    the overall condition to an inverted weighted score.
+
     Args:
         reading: SensorReading model instance
 
     Returns:
         Score from 0.0 to 100.0
     """
-    # Extract measurement values
-    co2_ppm = reading.co2_reading.co2_ppm if reading.co2_reading else None
-    temp_celsius = reading.temperature_reading.temperature_celsius if reading.temperature_reading else None
-    temp_fahrenheit = celsius_to_fahrenheit(temp_celsius)
-    humidity_pct = reading.humidity_reading.humidity_percentage if reading.humidity_reading else None
+    assessment = assess_reading(reading)
+    co2_score = condition_to_score(assessment['co2']['condition'])
+    temp_score = condition_to_score(assessment['temperature']['condition'])
+    humidity_score = condition_to_score(assessment['humidity']['condition'])
 
-    # Assess each metric
-    co2_cond = get_co2_condition(co2_ppm)
-    temp_cond = get_temperature_condition(temp_fahrenheit)
-    humidity_cond = get_humidity_condition(humidity_pct)
-
-    # Calculate weighted score (0 = best, 100 = worst internally)
-    CO2_WEIGHT = 0.80
-    TEMP_WEIGHT = 0.15
-    HUMIDITY_WEIGHT = 0.05
-
-    co2_score = condition_to_score(co2_cond)
-    temp_score = condition_to_score(temp_cond)
-    humidity_score = condition_to_score(humidity_cond)
-
-    weighted_score = (
-        (co2_score * CO2_WEIGHT) +
-        (temp_score * TEMP_WEIGHT) +
-        (humidity_score * HUMIDITY_WEIGHT)
-    )
-
-    # Invert so 100 = good, 0 = bad
+    weighted_score = (co2_score * 0.80) + (temp_score * 0.15) + (humidity_score * 0.05)
     return 100.0 - weighted_score
 
 
