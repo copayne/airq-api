@@ -1,7 +1,7 @@
 import graphene
 from graphene_sqlalchemy import SQLAlchemyObjectType
 from typing import Optional, List, Any, Dict
-from app.models import CO2Reading, HumidityReading, Location, Sensor, SensorLocation, SensorReading as SensorReadingModel, TemperatureReading, User, RingDevice, DashboardLayout, SensorHealthReport, AlertThreshold, AlertHistory
+from app.models import CO2Reading, HumidityReading, Location, Sensor, SensorLocation, SensorReading as SensorReadingModel, TemperatureReading, User, RingDevice, DashboardLayout, SensorHealthReport, AlertThreshold, AlertHistory, SecurityDevice, SecurityEvent, SecurityAutomation, SecurityDailySummary, SecuritySettings
 import requests
 from app import db
 from sqlalchemy import and_, or_, desc, asc
@@ -3505,6 +3505,584 @@ class ReportSensorHealth(graphene.Mutation):
             return ReportSensorHealth(success=False, message="Failed to store health report")
 
 
+# ============================================================================
+# Security System Types, Inputs, and Mutations
+# ============================================================================
+
+class SecurityDeviceObject(SQLAlchemyObjectType):
+    """GraphQL object for security devices."""
+    class Meta:
+        model = SecurityDevice
+
+
+class SecurityEventObject(SQLAlchemyObjectType):
+    """GraphQL object for security events."""
+    class Meta:
+        model = SecurityEvent
+
+
+class SecurityAutomationObject(SQLAlchemyObjectType):
+    """GraphQL object for security automation rules."""
+    class Meta:
+        model = SecurityAutomation
+
+
+class SecurityDailySummaryObject(SQLAlchemyObjectType):
+    """GraphQL object for security daily summaries."""
+    class Meta:
+        model = SecurityDailySummary
+
+
+class SecuritySettingsObject(SQLAlchemyObjectType):
+    """GraphQL object for security settings."""
+    class Meta:
+        model = SecuritySettings
+
+
+class SecurityDeviceInput(graphene.InputObjectType):
+    """Input for creating/updating a security device."""
+    device_id = graphene.String(required=True)
+    device_type = graphene.String(required=True)
+    name = graphene.String(required=True)
+    location = graphene.String()
+    provider = graphene.String()
+
+
+class SecurityEventFilterInput(graphene.InputObjectType):
+    """Input for filtering security events."""
+    device_id = graphene.Int()
+    event_type = graphene.String()
+    severity = graphene.String()
+    start_time = graphene.DateTime()
+    end_time = graphene.DateTime()
+    limit = graphene.Int()
+    offset = graphene.Int()
+
+
+class SecurityAutomationInput(graphene.InputObjectType):
+    """Input for creating/updating a security automation rule."""
+    name = graphene.String(required=True)
+    trigger_type = graphene.String(required=True)
+    trigger_config = graphene.JSONString(required=True)
+    action_type = graphene.String(required=True)
+    action_config = graphene.JSONString(required=True)
+    is_enabled = graphene.Boolean()
+
+
+class SecuritySettingsInput(graphene.InputObjectType):
+    """Input for updating security settings."""
+    email_digest_enabled = graphene.Boolean()
+    email_digest_time = graphene.String()
+    door_open_alert_minutes = graphene.Int()
+    preferences = graphene.JSONString()
+
+
+class UpdateSecurityDevice(graphene.Mutation):
+    """Upsert a security device by device_id."""
+    class Arguments:
+        input = SecurityDeviceInput(required=True)
+
+    success = graphene.Boolean()
+    message = graphene.String()
+    device = graphene.Field(SecurityDeviceObject)
+
+    @staticmethod
+    def mutate(root: Any, info: Any, input: SecurityDeviceInput) -> 'UpdateSecurityDevice':
+        """Upsert a security device by device_id (used by sync process)."""
+        try:
+            device = SecurityDevice.query.filter_by(device_id=input.device_id).first()
+
+            if device:
+                device.device_type = input.device_type
+                device.name = input.name
+                if input.location is not None:
+                    device.location = input.location
+                if input.provider is not None:
+                    device.provider = input.provider
+                device.is_active = True
+                device.updated_at = datetime.utcnow()
+            else:
+                device = SecurityDevice(
+                    device_id=input.device_id,
+                    device_type=input.device_type,
+                    name=input.name,
+                    location=input.location or '',
+                    provider=input.provider or 'ring',
+                    is_active=True
+                )
+                db.session.add(device)
+
+            db.session.commit()
+
+            logger.info(
+                "Security device upserted",
+                extra={'extra_context': {
+                    'device_id': input.device_id,
+                    'operation': 'update_security_device_success',
+                }}
+            )
+
+            return UpdateSecurityDevice(
+                success=True,
+                message="Security device updated successfully",
+                device=device
+            )
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Failed to upsert security device: {e}")
+            return UpdateSecurityDevice(
+                success=False,
+                message=f"Failed to update security device: {str(e)}",
+                device=None
+            )
+
+
+class BatchUpdateSecurityDevices(graphene.Mutation):
+    """Batch upsert security devices."""
+    class Arguments:
+        devices = graphene.List(SecurityDeviceInput, required=True)
+
+    success = graphene.Boolean()
+    message = graphene.String()
+    devices_updated = graphene.Int()
+    devices_created = graphene.Int()
+
+    @staticmethod
+    def mutate(root: Any, info: Any, devices: list) -> 'BatchUpdateSecurityDevices':
+        """Batch update or create security devices."""
+        try:
+            devices_updated = 0
+            devices_created = 0
+
+            for device_data in devices:
+                device = SecurityDevice.query.filter_by(device_id=device_data.device_id).first()
+
+                if device:
+                    device.device_type = device_data.device_type
+                    device.name = device_data.name
+                    if device_data.location is not None:
+                        device.location = device_data.location
+                    if device_data.provider is not None:
+                        device.provider = device_data.provider
+                    device.is_active = True
+                    device.updated_at = datetime.utcnow()
+                    devices_updated += 1
+                else:
+                    device = SecurityDevice(
+                        device_id=device_data.device_id,
+                        device_type=device_data.device_type,
+                        name=device_data.name,
+                        location=device_data.location or '',
+                        provider=device_data.provider or 'ring',
+                        is_active=True
+                    )
+                    db.session.add(device)
+                    devices_created += 1
+
+            db.session.commit()
+
+            logger.info(f"Batch updated security devices: {devices_updated} updated, {devices_created} created")
+
+            return BatchUpdateSecurityDevices(
+                success=True,
+                message=f"Successfully updated {devices_updated + devices_created} devices",
+                devices_updated=devices_updated,
+                devices_created=devices_created
+            )
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Batch update security devices failed: {e}")
+            return BatchUpdateSecurityDevices(
+                success=False,
+                message=f"Batch update failed: {str(e)}",
+                devices_updated=0,
+                devices_created=0
+            )
+
+
+class CreateSecurityEvent(graphene.Mutation):
+    """Log a new security event."""
+    class Arguments:
+        device_id = graphene.Int(required=True)
+        event_type = graphene.String(required=True)
+        severity = graphene.String()
+        message = graphene.String()
+        metadata = graphene.JSONString()
+
+    success = graphene.Boolean()
+    message = graphene.String()
+    event = graphene.Field(SecurityEventObject)
+
+    @staticmethod
+    def mutate(root: Any, info: Any, device_id: int, event_type: str,
+               severity: str = 'info', message: str = None, metadata: str = None) -> 'CreateSecurityEvent':
+        """Create a new security event."""
+        try:
+            device = SecurityDevice.query.get(device_id)
+            if not device:
+                return CreateSecurityEvent(
+                    success=False,
+                    message="Device not found",
+                    event=None
+                )
+
+            import json
+            metadata_parsed = None
+            if metadata is not None:
+                metadata_parsed = json.loads(metadata) if isinstance(metadata, str) else metadata
+
+            event = SecurityEvent(
+                device_id=device_id,
+                event_type=event_type,
+                severity=severity or 'info',
+                message=message,
+                extra_data=metadata_parsed
+            )
+            db.session.add(event)
+            db.session.commit()
+
+            # Publish real-time WebSocket event (failures never break ingestion)
+            try:
+                from app.events import publish_security_event
+                publish_security_event({
+                    'event_id': event.id,
+                    'device_id': device_id,
+                    'event_type': event_type,
+                    'severity': severity or 'info',
+                    'message': message,
+                    'timestamp': str(event.created_at),
+                })
+            except Exception:
+                logger.error(
+                    "WebSocket publish failed after security event commit",
+                    exc_info=True,
+                    extra={'extra_context': {
+                        'device_id': device_id,
+                        'event_id': event.id,
+                        'operation': 'ws_publish_security_event_error',
+                    }}
+                )
+
+            logger.info(
+                "Security event created",
+                extra={'extra_context': {
+                    'event_id': event.id,
+                    'device_id': device_id,
+                    'event_type': event_type,
+                    'operation': 'create_security_event_success',
+                }}
+            )
+
+            return CreateSecurityEvent(
+                success=True,
+                message="Security event created successfully",
+                event=event
+            )
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Failed to create security event: {e}")
+            return CreateSecurityEvent(
+                success=False,
+                message=f"Failed to create security event: {str(e)}",
+                event=None
+            )
+
+
+class CreateSecurityAutomation(graphene.Mutation):
+    """Create a security automation rule."""
+    class Arguments:
+        input = SecurityAutomationInput(required=True)
+
+    success = graphene.Boolean()
+    message = graphene.String()
+    automation = graphene.Field(SecurityAutomationObject)
+
+    @staticmethod
+    @require_user
+    def mutate(root: Any, info: Any, input: SecurityAutomationInput) -> 'CreateSecurityAutomation':
+        """Create a new security automation rule."""
+        try:
+            user = get_user_from_context(info.context)
+            if not user:
+                return CreateSecurityAutomation(
+                    success=False,
+                    message="Authentication required",
+                    automation=None
+                )
+
+            import json
+            trigger_config = json.loads(input.trigger_config) if isinstance(input.trigger_config, str) else input.trigger_config
+            action_config = json.loads(input.action_config) if isinstance(input.action_config, str) else input.action_config
+
+            automation = SecurityAutomation(
+                user_id=user.id,
+                name=input.name,
+                trigger_type=input.trigger_type,
+                trigger_config=trigger_config,
+                action_type=input.action_type,
+                action_config=action_config,
+                is_enabled=input.is_enabled if input.is_enabled is not None else True
+            )
+            db.session.add(automation)
+            db.session.commit()
+
+            logger.info(
+                "Security automation created",
+                extra={'extra_context': {
+                    'automation_id': automation.id,
+                    'user_id': user.id,
+                    'operation': 'create_security_automation_success',
+                }}
+            )
+
+            return CreateSecurityAutomation(
+                success=True,
+                message="Security automation created successfully",
+                automation=automation
+            )
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Failed to create security automation: {e}")
+            return CreateSecurityAutomation(
+                success=False,
+                message=f"Failed to create security automation: {str(e)}",
+                automation=None
+            )
+
+
+class UpdateSecurityAutomation(graphene.Mutation):
+    """Update a security automation rule."""
+    class Arguments:
+        id = graphene.Int(required=True)
+        input = SecurityAutomationInput(required=True)
+
+    success = graphene.Boolean()
+    message = graphene.String()
+    automation = graphene.Field(SecurityAutomationObject)
+
+    @staticmethod
+    @require_user
+    def mutate(root: Any, info: Any, id: int, input: SecurityAutomationInput) -> 'UpdateSecurityAutomation':
+        """Update an existing security automation rule."""
+        try:
+            user = get_user_from_context(info.context)
+            if not user:
+                return UpdateSecurityAutomation(
+                    success=False,
+                    message="Authentication required",
+                    automation=None
+                )
+
+            automation = SecurityAutomation.query.filter_by(id=id, user_id=user.id).first()
+            if not automation:
+                return UpdateSecurityAutomation(
+                    success=False,
+                    message="Automation rule not found",
+                    automation=None
+                )
+
+            import json
+            automation.name = input.name
+            automation.trigger_type = input.trigger_type
+            automation.trigger_config = json.loads(input.trigger_config) if isinstance(input.trigger_config, str) else input.trigger_config
+            automation.action_type = input.action_type
+            automation.action_config = json.loads(input.action_config) if isinstance(input.action_config, str) else input.action_config
+            if input.is_enabled is not None:
+                automation.is_enabled = input.is_enabled
+
+            db.session.commit()
+
+            logger.info(
+                "Security automation updated",
+                extra={'extra_context': {
+                    'automation_id': automation.id,
+                    'user_id': user.id,
+                    'operation': 'update_security_automation_success',
+                }}
+            )
+
+            return UpdateSecurityAutomation(
+                success=True,
+                message="Security automation updated successfully",
+                automation=automation
+            )
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Failed to update security automation: {e}")
+            return UpdateSecurityAutomation(
+                success=False,
+                message=f"Failed to update security automation: {str(e)}",
+                automation=None
+            )
+
+
+class DeleteSecurityAutomation(graphene.Mutation):
+    """Delete a security automation rule."""
+    class Arguments:
+        id = graphene.Int(required=True)
+
+    success = graphene.Boolean()
+    message = graphene.String()
+
+    @staticmethod
+    @require_user
+    def mutate(root: Any, info: Any, id: int) -> 'DeleteSecurityAutomation':
+        """Delete a security automation rule."""
+        try:
+            user = get_user_from_context(info.context)
+            if not user:
+                return DeleteSecurityAutomation(
+                    success=False,
+                    message="Authentication required"
+                )
+
+            automation = SecurityAutomation.query.filter_by(id=id, user_id=user.id).first()
+            if not automation:
+                return DeleteSecurityAutomation(
+                    success=False,
+                    message="Automation rule not found"
+                )
+
+            db.session.delete(automation)
+            db.session.commit()
+
+            logger.info(
+                "Security automation deleted",
+                extra={'extra_context': {
+                    'automation_id': id,
+                    'user_id': user.id,
+                    'operation': 'delete_security_automation_success',
+                }}
+            )
+
+            return DeleteSecurityAutomation(
+                success=True,
+                message="Security automation deleted successfully"
+            )
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Failed to delete security automation: {e}")
+            return DeleteSecurityAutomation(
+                success=False,
+                message=f"Failed to delete security automation: {str(e)}"
+            )
+
+
+class UpdateSecuritySettings(graphene.Mutation):
+    """Upsert user security settings."""
+    class Arguments:
+        input = SecuritySettingsInput(required=True)
+
+    success = graphene.Boolean()
+    message = graphene.String()
+    settings = graphene.Field(SecuritySettingsObject)
+
+    @staticmethod
+    @require_user
+    def mutate(root: Any, info: Any, input: SecuritySettingsInput) -> 'UpdateSecuritySettings':
+        """Upsert user security settings."""
+        try:
+            user = get_user_from_context(info.context)
+            if not user:
+                return UpdateSecuritySettings(
+                    success=False,
+                    message="Authentication required",
+                    settings=None
+                )
+
+            settings = SecuritySettings.query.filter_by(user_id=user.id).first()
+
+            if not settings:
+                settings = SecuritySettings(user_id=user.id)
+                db.session.add(settings)
+
+            if input.email_digest_enabled is not None:
+                settings.email_digest_enabled = input.email_digest_enabled
+            if input.email_digest_time is not None:
+                settings.email_digest_time = input.email_digest_time
+            if input.door_open_alert_minutes is not None:
+                settings.door_open_alert_minutes = input.door_open_alert_minutes
+            if input.preferences is not None:
+                import json
+                settings.preferences = json.loads(input.preferences) if isinstance(input.preferences, str) else input.preferences
+
+            db.session.commit()
+
+            logger.info(
+                "Security settings updated",
+                extra={'extra_context': {
+                    'user_id': user.id,
+                    'operation': 'update_security_settings_success',
+                }}
+            )
+
+            return UpdateSecuritySettings(
+                success=True,
+                message="Security settings updated successfully",
+                settings=settings
+            )
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Failed to update security settings: {e}")
+            return UpdateSecuritySettings(
+                success=False,
+                message=f"Failed to update security settings: {str(e)}",
+                settings=None
+            )
+
+
+class PurgeOldSecurityEvents(graphene.Mutation):
+    """Delete security events older than 30 days."""
+    class Arguments:
+        pass
+
+    success = graphene.Boolean()
+    message = graphene.String()
+    events_deleted = graphene.Int()
+
+    @staticmethod
+    @require_admin
+    def mutate(root: Any, info: Any) -> 'PurgeOldSecurityEvents':
+        """Delete security events older than 30 days."""
+        try:
+            cutoff_date = datetime.utcnow() - timedelta(days=30)
+            count = SecurityEvent.query.filter(
+                SecurityEvent.created_at < cutoff_date
+            ).delete()
+            db.session.commit()
+
+            logger.info(
+                f"Purged {count} old security events",
+                extra={'extra_context': {
+                    'events_deleted': count,
+                    'cutoff_date': str(cutoff_date),
+                    'operation': 'purge_old_security_events_success',
+                }}
+            )
+
+            return PurgeOldSecurityEvents(
+                success=True,
+                message=f"Successfully purged {count} events older than 30 days",
+                events_deleted=count
+            )
+
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Failed to purge old security events: {e}")
+            return PurgeOldSecurityEvents(
+                success=False,
+                message=f"Failed to purge events: {str(e)}",
+                events_deleted=0
+            )
+
+
 class Mutation(graphene.ObjectType):
     create_sensor_reading = CreateSensorReading.Field()
     register_user = RegisterUser.Field()
@@ -3624,6 +4202,37 @@ class Query(graphene.ObjectType):
     )
     unacknowledged_alert_count = graphene.Int(
         description="Count of unacknowledged alerts for current user"
+    )
+
+    # Security queries
+    security_devices = graphene.List(
+        SecurityDeviceObject,
+        device_type=graphene.String(),
+        description="Get all active security devices, optionally filtered by type"
+    )
+    security_events = graphene.List(
+        SecurityEventObject,
+        filter=SecurityEventFilterInput(),
+        description="Get security events with optional filtering"
+    )
+    security_device_status = graphene.Field(
+        SecurityDeviceObject,
+        device_id=graphene.String(required=True),
+        description="Get a single security device by device_id"
+    )
+    security_automations = graphene.List(
+        SecurityAutomationObject,
+        description="Get current user's automation rules"
+    )
+    security_daily_summary = graphene.List(
+        SecurityDailySummaryObject,
+        start_date=graphene.Date(),
+        end_date=graphene.Date(),
+        description="Get daily summaries for a date range"
+    )
+    security_settings = graphene.Field(
+        SecuritySettingsObject,
+        description="Get current user's security settings"
     )
 
     def resolve_sensors(self, info: Any) -> List[Sensor]:
@@ -4211,6 +4820,65 @@ class Query(graphene.ObjectType):
         if not user:
             return 0
         return AlertHistory.query.filter_by(user_id=user.id, acknowledged=False).count()
+
+    def resolve_security_devices(self, info: Any, device_type: Optional[str] = None) -> List[SecurityDevice]:
+        """Get all active security devices, optionally filtered by type."""
+        query = SecurityDevice.query.filter_by(is_active=True)
+        if device_type:
+            query = query.filter_by(device_type=device_type)
+        return query.order_by(SecurityDevice.name).all()
+
+    def resolve_security_events(self, info: Any, filter: Optional[SecurityEventFilterInput] = None) -> List[SecurityEvent]:
+        """Get security events with optional filtering."""
+        query = SecurityEvent.query
+        if filter:
+            if filter.device_id:
+                query = query.filter_by(device_id=filter.device_id)
+            if filter.event_type:
+                query = query.filter_by(event_type=filter.event_type)
+            if filter.severity:
+                query = query.filter_by(severity=filter.severity)
+            if filter.start_time:
+                query = query.filter(SecurityEvent.created_at >= filter.start_time)
+            if filter.end_time:
+                query = query.filter(SecurityEvent.created_at <= filter.end_time)
+            limit = filter.limit or 50
+            offset = filter.offset or 0
+        else:
+            limit = 50
+            offset = 0
+        return query.order_by(desc(SecurityEvent.created_at)).offset(offset).limit(limit).all()
+
+    def resolve_security_device_status(self, info: Any, device_id: str) -> Optional[SecurityDevice]:
+        """Get a single security device by device_id."""
+        return SecurityDevice.query.filter_by(device_id=device_id).first()
+
+    @require_user
+    def resolve_security_automations(self, info: Any) -> List[SecurityAutomation]:
+        """Get current user's automation rules."""
+        user = get_user_from_context(info)
+        if not user:
+            return []
+        return SecurityAutomation.query.filter_by(user_id=user.id).order_by(SecurityAutomation.name).all()
+
+    def resolve_security_daily_summary(
+        self, info: Any, start_date=None, end_date=None
+    ) -> List[SecurityDailySummary]:
+        """Get daily summaries for a date range."""
+        query = SecurityDailySummary.query
+        if start_date:
+            query = query.filter(SecurityDailySummary.summary_date >= start_date)
+        if end_date:
+            query = query.filter(SecurityDailySummary.summary_date <= end_date)
+        return query.order_by(desc(SecurityDailySummary.summary_date)).all()
+
+    @require_user
+    def resolve_security_settings(self, info: Any) -> Optional[SecuritySettings]:
+        """Get current user's security settings."""
+        user = get_user_from_context(info)
+        if not user:
+            return None
+        return SecuritySettings.query.filter_by(user_id=user.id).first()
 
 
 def _build_sensor_health_object(sensor: Sensor) -> Dict[str, Any]:

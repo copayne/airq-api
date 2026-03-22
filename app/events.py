@@ -97,3 +97,42 @@ def publish_alert(user_id: int, data: Dict[str, Any]) -> None:
                 'operation': 'publish_alert_error',
             }}
         )
+
+
+def publish_security_event(data: Dict[str, Any]) -> None:
+    """Emit a security_event to all connected clients."""
+    try:
+        socketio.emit('security_event', data)
+    except Exception:
+        logger.error(
+            "Failed to publish security event",
+            exc_info=True,
+            extra={'extra_context': {'operation': 'publish_security_event_error'}}
+        )
+
+
+def publish_security_device_update(data: Dict[str, Any]) -> None:
+    """Emit a security_device_update to all connected clients."""
+    try:
+        socketio.emit('security_device_update', data)
+    except Exception:
+        logger.error(
+            "Failed to publish security device update",
+            exc_info=True,
+            extra={'extra_context': {'operation': 'publish_security_device_update_error'}}
+        )
+
+
+def publish_security_alert(user_id: int, data: Dict[str, Any]) -> None:
+    """Emit a security_alert to a specific user's room."""
+    try:
+        socketio.emit('security_alert', data, to=f'user_{user_id}')
+    except Exception:
+        logger.error(
+            "Failed to publish security alert",
+            exc_info=True,
+            extra={'extra_context': {
+                'user_id': user_id,
+                'operation': 'publish_security_alert_error',
+            }}
+        )

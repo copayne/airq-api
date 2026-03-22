@@ -645,6 +645,120 @@ class AlertCooldown(db.Model):
         return f'<AlertCooldown User:{self.user_id} Sensor:{self.sensor_id} Last:{self.last_alert_time}>'
 
 
+class SecurityDevice(db.Model):
+    """Model for security device registry (Ring sensors, cameras, etc.)."""
+    __tablename__ = 'security_devices'
+
+    id = db.Column(db.Integer, primary_key=True)
+    device_id = db.Column(db.String(100), nullable=False, unique=True, index=True)
+    device_type = db.Column(db.String(50), nullable=False, index=True)
+    name = db.Column(db.String(200), nullable=False)
+    location = db.Column(db.String(200))
+    provider = db.Column(db.String(50), nullable=False, default='ring')
+    is_active = db.Column(db.Boolean, default=True)
+    battery_level = db.Column(db.Integer, nullable=True)
+    status = db.Column(db.String(50), nullable=True)
+    last_status_change = db.Column(db.DateTime, nullable=True)
+    extra_data = db.Column('metadata', db.JSON, nullable=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    events = relationship("SecurityEvent", back_populates="device", lazy="select")
+
+    def __repr__(self) -> str:
+        """Return string representation of SecurityDevice instance."""
+        return f'<SecurityDevice {self.name} ({self.device_type})>'
+
+
+class SecurityEvent(db.Model):
+    """Model for security event log entries."""
+    __tablename__ = 'security_events'
+
+    id = db.Column(db.Integer, primary_key=True)
+    device_id = db.Column(db.Integer, db.ForeignKey('security_devices.id'), nullable=False, index=True)
+    event_type = db.Column(db.String(50), nullable=False, index=True)
+    severity = db.Column(db.String(20), nullable=False, default='info')
+    message = db.Column(db.String(500), nullable=True)
+    extra_data = db.Column('metadata', db.JSON, nullable=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+    # Relationships
+    device = relationship("SecurityDevice", back_populates="events")
+
+    __table_args__ = (
+        db.Index('idx_security_events_device_created', 'device_id', 'created_at'),
+    )
+
+    def __repr__(self) -> str:
+        """Return string representation of SecurityEvent instance."""
+        return f'<SecurityEvent {self.event_type} ({self.severity})>'
+
+
+class SecurityAutomation(db.Model):
+    """Model for security automation rules."""
+    __tablename__ = 'security_automations'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    name = db.Column(db.String(200), nullable=False)
+    trigger_type = db.Column(db.String(50), nullable=False)
+    trigger_config = db.Column(db.JSON, nullable=False)
+    action_type = db.Column(db.String(50), nullable=False)
+    action_config = db.Column(db.JSON, nullable=False)
+    is_enabled = db.Column(db.Boolean, default=True)
+    last_triggered = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    user = relationship("User", backref=db.backref("security_automations", lazy="dynamic", cascade="all, delete-orphan"))
+
+    def __repr__(self) -> str:
+        """Return string representation of SecurityAutomation instance."""
+        return f'<SecurityAutomation {self.name} ({self.trigger_type})>'
+
+
+class SecurityDailySummary(db.Model):
+    """Model for pre-computed daily security summaries."""
+    __tablename__ = 'security_daily_summaries'
+
+    id = db.Column(db.Integer, primary_key=True)
+    summary_date = db.Column(db.Date, nullable=False, unique=True, index=True)
+    total_events = db.Column(db.Integer, nullable=False, default=0)
+    door_opens = db.Column(db.Integer, nullable=False, default=0)
+    motion_events = db.Column(db.Integer, nullable=False, default=0)
+    alarm_state_changes = db.Column(db.Integer, nullable=False, default=0)
+    alerts_triggered = db.Column(db.Integer, nullable=False, default=0)
+    summary_data = db.Column(db.JSON, nullable=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+    def __repr__(self) -> str:
+        """Return string representation of SecurityDailySummary instance."""
+        return f'<SecurityDailySummary {self.summary_date} (events: {self.total_events})>'
+
+
+class SecuritySettings(db.Model):
+    """Model for per-user security preferences."""
+    __tablename__ = 'security_settings'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False, unique=True, index=True)
+    email_digest_enabled = db.Column(db.Boolean, nullable=False, default=False)
+    email_digest_time = db.Column(db.String(5), nullable=False, default='08:00')
+    door_open_alert_minutes = db.Column(db.Integer, nullable=False, default=5)
+    preferences = db.Column(db.JSON, nullable=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    user = relationship("User", backref=db.backref("security_settings", uselist=False, cascade="all, delete-orphan"))
+
+    def __repr__(self) -> str:
+        """Return string representation of SecuritySettings instance."""
+        return f'<SecuritySettings (User: {self.user_id})>'
+
+
 # Composite indexes for critical query performance
 # These indexes optimize the most frequent query patterns identified in OPTIMIZE.md
 
